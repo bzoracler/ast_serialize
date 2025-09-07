@@ -1,0 +1,35 @@
+[package]
+name = "mypy_parser"
+version = "0.0.0"
+publish = false
+authors = { workspace = true }
+edition = { workspace = true }
+rust-version = { workspace = true }
+homepage = { workspace = true }
+documentation = { workspace = true }
+repository = { workspace = true }
+license = { workspace = true }
+
+[dependencies]
+ruff_linter = { workspace = true, features = ["schemars"] }
+ruff_python_ast = { workspace = true }
+ruff_python_parser = { workspace = true }
+
+anyhow = { workspace = true }
+clap = { workspace = true, features = ["wrap_help"] }
+ignore = { workspace = true }
+itertools = { workspace = true }
+libcst = { workspace = true }
+regex = { workspace = true }
+schemars = { workspace = true }
+tempfile = { workspace = true }
+
+[dev-dependencies]
+indoc = { workspace = true }
+
+[features]
+# Turn off rayon for profiling
+singlethreaded = []
+
+[lints]
+workspace = true
