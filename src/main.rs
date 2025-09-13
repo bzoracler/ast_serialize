@@ -8,6 +8,7 @@ use std::process::ExitCode;
 
 mod print_ast;
 mod print_tokens;
+mod serialize_ast;
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -24,6 +25,8 @@ enum Command {
     PrintAST(print_ast::Args),
     /// Print the token stream for a given Python file.
     PrintTokens(print_tokens::Args),
+    // Serialize AST into mypy format.
+    SerializeAST(serialize_ast::Args),
 }
 
 fn main() -> Result<ExitCode> {
@@ -34,6 +37,7 @@ fn main() -> Result<ExitCode> {
     match command {
         Command::PrintAST(args) => print_ast::main(&args)?,
         Command::PrintTokens(args) => print_tokens::main(&args)?,
+        Command::SerializeAST(args) => serialize_ast::main(&args)?,
     }
     Ok(ExitCode::SUCCESS)
 }
