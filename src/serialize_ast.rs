@@ -52,6 +52,7 @@ impl Ser for ast::Mod {
     fn serialize<W: Write>(&self, w: &mut W) -> io::Result<()> {
         match self {
             ast::Mod::Module(m) => {
+                write_usize(w, m.body.len())?;
                 for stmt in &m.body {
                     stmt.serialize(w)?;
                 }
@@ -144,6 +145,7 @@ mod tests {
         ast.serialize(&mut v).unwrap();
 
         let expected = &[
+            2,
             TAG_EXPR_STMT,
             TAG_CALL_EXPR,
             TAG_NAME_EXPR,
