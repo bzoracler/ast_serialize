@@ -91,21 +91,20 @@ impl Ser for ast::Expr {
         match self {
             ast::Expr::Name(n) => {
                 w.write(&[TAG_NAME_EXPR])?;
-                write_loc(w, n.range())?;
                 write_bytes(w, n.id.as_bytes())?;
+                write_loc(w, n.range())?;
             }
             ast::Expr::StringLiteral(s) => {
                 w.write(&[TAG_STR_EXPR])?;
-                write_loc(w, s.range())?;
                 let value = &s.value;
                 write_usize(w, value.len())?;
                 for part in value.iter() {
                     w.write(part.as_bytes())?;
                 }
+                write_loc(w, s.range())?;
             }
             ast::Expr::Call(c) => {
                 w.write(&[TAG_CALL_EXPR])?;
-                write_loc(w, c.range())?;
                 c.func.serialize(w, l, text)?;
                 let args = &c.arguments;
                 write_int(w, args.len() as i64)?;
@@ -116,6 +115,7 @@ impl Ser for ast::Expr {
                     // TODO: Keywords
                     panic!("unsupported: {:?}", args.keywords);
                 }
+                write_loc(w, c.range())?;
             }
             _ => {
                 panic!("unsupported: {self:?}");
@@ -137,7 +137,12 @@ fn write_location<W: Write>(w: &mut W, l: &LineIndex, text: &str, range: TextRan
 
 fn write_int(w: &mut impl Write, i: i64) -> io::Result<usize> {
     // TODO: Also support cases that don't fit into 1 byte
-    w.write(&[((i - MIN_SHORT_INT) << 1) as u8])
+    if i >= MIN_SHORT_INT && i < 128 + MIN_SHORT_INT {
+        w.write(&[((i - MIN_SHORT_INT) << 1) as u8])
+    } else {
+        w.write(&[1])?;
+        w.write(&(i << 1).to_le_bytes())
+    }
 }
 
 fn write_usize(w: &mut impl Write, i: usize) -> io::Result<usize> {
@@ -173,15 +178,7 @@ mod tests {
             int_val(1),
             TAG_EXPR_STMT,
             TAG_CALL_EXPR,
-            int_val(1),
-            int_val(1),
-            int_val(0),
-            int_val(15),
             TAG_NAME_EXPR,
-            int_val(1),
-            int_val(1),
-            int_val(0),
-            int_val(6),
             10,
             b'p',
             b'r',
@@ -189,17 +186,25 @@ mod tests {
             b'n',
             b't',
             int_val(1),
-            TAG_STR_EXPR,
             int_val(1),
-            int_val(7),
             int_val(0),
-            int_val(14),
+            int_val(6),
+            int_val(1),
+            TAG_STR_EXPR,
             10,
             b'h',
             b'e',
             b'l',
             b'l',
             b'o',
+            int_val(1),
+            int_val(7),
+            int_val(0),
+            int_val(14),
+            int_val(1),
+            int_val(1),
+            int_val(0),
+            int_val(15),
         ];
 
         assert_eq!(v, expected);
