@@ -9,6 +9,8 @@ use ruff_linter::source_kind::SourceKind;
 use ruff_python_ast::PySourceType;
 use ruff_python_ast::{self as ast};
 use ruff_python_parser::{ParseOptions, parse};
+use ruff_source_file::LineIndex;
+use ruff_text_size::{Ranged, TextRange};
 
 const TAG_EXPR_STMT: u8 = 11;
 const TAG_CALL_EXPR: u8 = 12;
@@ -37,7 +39,8 @@ pub(crate) fn main(args: &Args) -> Result<()> {
         parse(source_kind.source_code(), ParseOptions::from(source_type))?.into_syntax();
     let _ = start.elapsed();
     let mut v = Vec::new();
-    python_ast.serialize(&mut v).unwrap();
+    let line_index = LineIndex::from_source_text(source_kind.source_code());
+    python_ast.serialize(&mut v, &line_index, source_kind.source_code()).unwrap();
 
     io::stdout().write_all(&v)?;
 
@@ -45,16 +48,16 @@ pub(crate) fn main(args: &Args) -> Result<()> {
 }
 
 trait Ser {
-    fn serialize<W: Write>(&self, w: &mut W) -> io::Result<()>;
+    fn serialize<W: Write>(&self, w: &mut W, l: &LineIndex, text: &str) -> io::Result<()>;
 }
 
 impl Ser for ast::Mod {
-    fn serialize<W: Write>(&self, w: &mut W) -> io::Result<()> {
+    fn serialize<W: Write>(&self, w: &mut W, l: &LineIndex, text: &str) -> io::Result<()> {
         match self {
             ast::Mod::Module(m) => {
                 write_int(w, m.body.len() as i64)?;
                 for stmt in &m.body {
-                    stmt.serialize(w)?;
+                    stmt.serialize(w, l, text)?;
                 }
             }
             ast::Mod::Expression(_) => {
@@ -66,12 +69,12 @@ impl Ser for ast::Mod {
 }
 
 impl Ser for ast::Stmt {
-    fn serialize<W: Write>(&self, w: &mut W) -> io::Result<()> {
+    fn serialize<W: Write>(&self, w: &mut W, l: &LineIndex, text: &str) -> io::Result<()> {
         match self {
             ast::Stmt::Expr(e) => {
                 w.write(&[TAG_EXPR_STMT])?;
                 // TODO: Write type tag
-                e.value.serialize(w)?;
+                e.value.serialize(w, l, text)?;
             }
             _ => {
                 panic!("unsupported: {self:?}");
@@ -82,14 +85,18 @@ impl Ser for ast::Stmt {
 }
 
 impl Ser for ast::Expr {
-    fn serialize<W: Write>(&self, w: &mut W) -> io::Result<()> {
+    fn serialize<W: Write>(&self, w: &mut W, l: &LineIndex, text: &str) -> io::Result<()> {
+        let write_loc = |w: &mut W, r: TextRange| write_location(w, l, text, r);
+
         match self {
             ast::Expr::Name(n) => {
                 w.write(&[TAG_NAME_EXPR])?;
+                write_loc(w, n.range())?;
                 write_bytes(w, n.id.as_bytes())?;
             }
             ast::Expr::StringLiteral(s) => {
                 w.write(&[TAG_STR_EXPR])?;
+                write_loc(w, s.range())?;
                 let value = &s.value;
                 write_usize(w, value.len())?;
                 for part in value.iter() {
@@ -98,11 +105,12 @@ impl Ser for ast::Expr {
             }
             ast::Expr::Call(c) => {
                 w.write(&[TAG_CALL_EXPR])?;
-                c.func.serialize(w)?;
+                write_loc(w, c.range())?;
+                c.func.serialize(w, l, text)?;
                 let args = &c.arguments;
                 write_int(w, args.len() as i64)?;
                 for arg in &args.args {
-                    arg.serialize(w)?;
+                    arg.serialize(w, l, text)?;
                 }
                 if args.keywords.len() > 0 {
                     // TODO: Keywords
@@ -115,6 +123,16 @@ impl Ser for ast::Expr {
         };
         Ok(())
     }
+}
+
+fn write_location<W: Write>(w: &mut W, l: &LineIndex, text: &str, range: TextRange) -> io::Result<()> {
+    let st_loc = l.line_column(range.start(), text);
+    write_int(w, st_loc.line.get() as i64)?;
+    write_int(w, st_loc.column.get() as i64)?;
+    let end_loc = l.line_column(range.end(), text);
+    write_int(w, (end_loc.line.get() - st_loc.line.get()) as i64)?;
+    write_int(w, end_loc.column.get() as i64)?;
+    Ok(())
 }
 
 fn write_int(w: &mut impl Write, i: i64) -> io::Result<usize> {
@@ -145,15 +163,25 @@ mod tests {
     #[test]
     fn print_hello() {
         let opt = ParseOptions::from(PySourceType::Python);
-        let ast = parse("print('hello')", opt).unwrap().into_syntax();
+        let text = "print('hello')";
+        let ast = parse(text, opt).unwrap().into_syntax();
         let mut v = Vec::new();
-        ast.serialize(&mut v).unwrap();
+        let index = LineIndex::from_source_text(text);
+        ast.serialize(&mut v, &index, text).unwrap();
 
         let expected = &[
             int_val(1),
             TAG_EXPR_STMT,
             TAG_CALL_EXPR,
+            int_val(1),
+            int_val(1),
+            int_val(0),
+            int_val(15),
             TAG_NAME_EXPR,
+            int_val(1),
+            int_val(1),
+            int_val(0),
+            int_val(6),
             10,
             b'p',
             b'r',
@@ -162,6 +190,10 @@ mod tests {
             b't',
             int_val(1),
             TAG_STR_EXPR,
+            int_val(1),
+            int_val(7),
+            int_val(0),
+            int_val(14),
             10,
             b'h',
             b'e',
