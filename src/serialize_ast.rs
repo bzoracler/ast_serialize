@@ -16,6 +16,7 @@ const TAG_EXPR_STMT: u8 = 11;
 const TAG_CALL_EXPR: u8 = 12;
 const TAG_NAME_EXPR: u8 = 13;
 const TAG_STR_EXPR: u8 = 14;
+const TAG_IMPORT: u8 = 15;
 
 const MIN_SHORT_INT: i64 = -10;
 
@@ -40,24 +41,35 @@ pub(crate) fn main(args: &Args) -> Result<()> {
     let _ = start.elapsed();
     let mut v = Vec::new();
     let line_index = LineIndex::from_source_text(source_kind.source_code());
-    python_ast.serialize(&mut v, &line_index, source_kind.source_code()).unwrap();
+    let mut state = State { imports: Vec::new() };
+    python_ast.serialize(&mut v, &mut state, &line_index, source_kind.source_code()).unwrap();
 
     io::stdout().write_all(&v)?;
 
     Ok(())
 }
 
+struct Import {
+    name: String,
+    relative: i32,
+    as_name: Option<String>,
+}
+
+struct State {
+    imports: Vec<Import>
+}
+
 trait Ser {
-    fn serialize<W: Write>(&self, w: &mut W, l: &LineIndex, text: &str) -> io::Result<()>;
+    fn serialize<W: Write>(&self, w: &mut W, state: &mut State, l: &LineIndex, text: &str) -> io::Result<()>;
 }
 
 impl Ser for ast::Mod {
-    fn serialize<W: Write>(&self, w: &mut W, l: &LineIndex, text: &str) -> io::Result<()> {
+    fn serialize<W: Write>(&self, w: &mut W, state: &mut State, l: &LineIndex, text: &str) -> io::Result<()> {
         match self {
             ast::Mod::Module(m) => {
                 write_int(w, m.body.len() as i64)?;
                 for stmt in &m.body {
-                    stmt.serialize(w, l, text)?;
+                    stmt.serialize(w, state, l, text)?;
                 }
             }
             ast::Mod::Expression(_) => {
@@ -69,12 +81,19 @@ impl Ser for ast::Mod {
 }
 
 impl Ser for ast::Stmt {
-    fn serialize<W: Write>(&self, w: &mut W, l: &LineIndex, text: &str) -> io::Result<()> {
+    fn serialize<W: Write>(&self, w: &mut W, state: &mut State, l: &LineIndex, text: &str) -> io::Result<()> {
         match self {
             ast::Stmt::Expr(e) => {
                 w.write(&[TAG_EXPR_STMT])?;
-                // TODO: Write type tag
-                e.value.serialize(w, l, text)?;
+                e.value.serialize(w, state, l, text)?;
+            }
+            ast::Stmt::Import(i) => {
+                w.write(&[TAG_IMPORT])?;
+                for name in &i.names {
+                    write_bytes(w, name.name.as_bytes())?;
+                    state.imports.push(Import { name: name.name.to_string(), relative: 0, as_name: None});
+                }
+                write_location(w, l, text, i.range())?;                
             }
             _ => {
                 panic!("unsupported: {self:?}");
@@ -85,7 +104,7 @@ impl Ser for ast::Stmt {
 }
 
 impl Ser for ast::Expr {
-    fn serialize<W: Write>(&self, w: &mut W, l: &LineIndex, text: &str) -> io::Result<()> {
+    fn serialize<W: Write>(&self, w: &mut W, state: &mut State, l: &LineIndex, text: &str) -> io::Result<()> {
         let write_loc = |w: &mut W, r: TextRange| write_location(w, l, text, r);
 
         match self {
@@ -105,11 +124,11 @@ impl Ser for ast::Expr {
             }
             ast::Expr::Call(c) => {
                 w.write(&[TAG_CALL_EXPR])?;
-                c.func.serialize(w, l, text)?;
+                c.func.serialize(w, state, l, text)?;
                 let args = &c.arguments;
                 write_int(w, args.len() as i64)?;
                 for arg in &args.args {
-                    arg.serialize(w, l, text)?;
+                    arg.serialize(w, state, l, text)?;
                 }
                 if args.keywords.len() > 0 {
                     // TODO: Keywords
@@ -123,16 +142,6 @@ impl Ser for ast::Expr {
         };
         Ok(())
     }
-}
-
-fn write_location<W: Write>(w: &mut W, l: &LineIndex, text: &str, range: TextRange) -> io::Result<()> {
-    let st_loc = l.line_column(range.start(), text);
-    write_int(w, st_loc.line.get() as i64)?;
-    write_int(w, st_loc.column.get() as i64)?;
-    let end_loc = l.line_column(range.end(), text);
-    write_int(w, (end_loc.line.get() - st_loc.line.get()) as i64)?;
-    write_int(w, end_loc.column.get() as i64)?;
-    Ok(())
 }
 
 fn write_int(w: &mut impl Write, i: i64) -> io::Result<usize> {
@@ -156,6 +165,16 @@ fn write_bytes(w: &mut impl Write, b: &[u8]) -> io::Result<()> {
     Ok(())
 }
 
+fn write_location<W: Write>(w: &mut W, l: &LineIndex, text: &str, range: TextRange) -> io::Result<()> {
+    let st_loc = l.line_column(range.start(), text);
+    write_int(w, st_loc.line.get() as i64)?;
+    write_int(w, st_loc.column.get() as i64)?;
+    let end_loc = l.line_column(range.end(), text);
+    write_int(w, (end_loc.line.get() - st_loc.line.get()) as i64)?;
+    write_int(w, end_loc.column.get() as i64)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -172,7 +191,9 @@ mod tests {
         let ast = parse(text, opt).unwrap().into_syntax();
         let mut v = Vec::new();
         let index = LineIndex::from_source_text(text);
-        ast.serialize(&mut v, &index, text).unwrap();
+        let mut state = State { imports: Vec::new() };
+        ast.serialize(&mut v, &mut state, &index, text).unwrap();
+        let _ = state;  // TODO: drop when not needed
 
         let expected = &[
             int_val(1),
