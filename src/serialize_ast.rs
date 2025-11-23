@@ -38,6 +38,7 @@ const TAG_CALL_EXPR: u8 = 161;
 const TAG_NAME_EXPR: u8 = 162;
 const TAG_STR_EXPR: u8 = 163;
 const TAG_IMPORT: u8 = 164;
+const TAG_MEMBER_EXPR: u8 = 165;
 
 const MIN_SHORT_INT: i64 = -10;
 const MIN_TWO_BYTES_INT: i64 = -100;
@@ -143,7 +144,12 @@ impl Ser for ast::Expr {
                 write_tag(w, TAG_NAME_EXPR)?;
                 write_bytes(w, n.id.as_bytes())?;
                 write_loc(w, n.range())?;
-                write_end_tag(w)?;
+            }
+            ast::Expr::Attribute(a) => {
+                write_tag(w, TAG_MEMBER_EXPR)?;
+                a.value.serialize(w, state, l, text)?;
+                write_bytes(w, a.attr.as_bytes())?;
+                write_loc(w, a.range())?;
             }
             ast::Expr::StringLiteral(s) => {
                 write_tag(w, TAG_STR_EXPR)?;
@@ -154,7 +160,6 @@ impl Ser for ast::Expr {
                     w.write(part.as_bytes())?;
                 }
                 write_loc(w, s.range())?;
-                write_end_tag(w)?;
             }
             ast::Expr::Call(c) => {
                 write_tag(w, TAG_CALL_EXPR)?;
@@ -170,13 +175,12 @@ impl Ser for ast::Expr {
                     panic!("unsupported: {:?}", args.keywords);
                 }
                 write_loc(w, c.range())?;
-                write_end_tag(w)?;
             }
             _ => {
                 panic!("unsupported: {self:?}");
             }
         };
-        Ok(())
+        write_end_tag(w)
     }
 }
 
