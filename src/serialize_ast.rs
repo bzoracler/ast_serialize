@@ -32,11 +32,12 @@ const TAG_DICT_STR_GEN: u8  = 30;
 // End tag for composite objects
 const TAG_END: u8 = 255;
 
-const TAG_EXPR_STMT: u8 = 150;
-const TAG_CALL_EXPR: u8 = 151;
-const TAG_NAME_EXPR: u8 = 152;
-const TAG_STR_EXPR: u8 = 153;
-const TAG_IMPORT: u8 = 154;
+const TAG_LOCATION: u8 = 152;
+const TAG_EXPR_STMT: u8 = 160;
+const TAG_CALL_EXPR: u8 = 161;
+const TAG_NAME_EXPR: u8 = 162;
+const TAG_STR_EXPR: u8 = 163;
+const TAG_IMPORT: u8 = 164;
 
 const MIN_SHORT_INT: i64 = -10;
 const MIN_TWO_BYTES_INT: i64 = -100;
@@ -229,12 +230,15 @@ fn write_bytes(w: &mut impl Write, b: &[u8]) -> io::Result<()> {
 }
 
 fn write_location<W: Write>(w: &mut W, l: &LineIndex, text: &str, range: TextRange) -> io::Result<()> {
+    write_tag(w, TAG_LOCATION)?;
     let st_loc = l.line_column(range.start(), text);
-    write_int(w, st_loc.line.get() as i64)?;
-    write_int(w, st_loc.column.get() as i64)?;
+    let st_line = st_loc.line.get() as i64;
+    let st_column = st_loc.column.get() as i64;
+    write_int(w, st_line)?;
+    write_int(w, st_column)?;
     let end_loc = l.line_column(range.end(), text);
-    write_int(w, (end_loc.line.get() - st_loc.line.get()) as i64)?;
-    write_int(w, end_loc.column.get() as i64)
+    write_int(w, (end_loc.line.get() as i64) - st_line)?;
+    write_int(w, (end_loc.column.get() as i64) - st_column)
 }
 
 #[cfg(test)]
@@ -326,10 +330,11 @@ mod tests {
             b'i',
             b'n',
             b't',
+            TAG_LOCATION,
             int_val(1),
             int_val(1),
             int_val(0),
-            int_val(6),
+            int_val(5),
             TAG_END,
             TAG_LIST_GEN,
             int_val(1),
@@ -341,15 +346,17 @@ mod tests {
             b'l',
             b'l',
             b'o',
+            TAG_LOCATION,
             int_val(1),
             int_val(7),
             int_val(0),
-            int_val(14),
+            int_val(7),
             TAG_END,
+            TAG_LOCATION,
             int_val(1),
             int_val(1),
             int_val(0),
-            int_val(15),
+            int_val(14),
             TAG_END,
             TAG_END,
         ];
