@@ -96,7 +96,7 @@ impl Ser for ast::Mod {
     fn serialize<W: Write>(&self, w: &mut W, state: &mut State, l: &LineIndex, text: &str) -> io::Result<()> {
         match self {
             ast::Mod::Module(m) => {
-                write_int(w, m.body.len() as i64)?;
+                write_tagged_int(w, m.body.len() as i64)?;
                 for stmt in &m.body {
                     stmt.serialize(w, state, l, text)?;
                 }
@@ -178,6 +178,12 @@ impl Ser for ast::Expr {
         };
         Ok(())
     }
+}
+
+#[inline]
+fn write_tagged_int(w: &mut impl Write, i: i64) -> io::Result<()> {
+    write_tag(w, TAG_LITERAL_INT)?;
+    write_int(w, i)
 }
 
 fn write_int(w: &mut impl Write, i: i64) -> io::Result<()> {
@@ -319,6 +325,7 @@ mod tests {
         let _ = state;  // TODO: drop when not needed
 
         let expected = &[
+            TAG_LITERAL_INT,
             int_val(1),
             TAG_EXPR_STMT,
             TAG_CALL_EXPR,
