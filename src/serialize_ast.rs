@@ -178,6 +178,16 @@ trait Ser {
     fn serialize(&self, ser: &mut Serializer);
 }
 
+impl Ser for Vec<ast::Expr> {
+    fn serialize(&self, ser: &mut Serializer) {
+        ser.write_tag(TAG_LIST_GEN);
+        ser.write_int(self.len() as i64);
+        for e in self {
+            e.serialize(ser);
+        }
+    }
+}
+
 impl Ser for ast::Mod {
     fn serialize(&self, ser: &mut Serializer) {
         match self {
@@ -200,6 +210,11 @@ impl Ser for ast::Stmt {
             ast::Stmt::Expr(e) => {
                 ser.write_tag(TAG_EXPR_STMT);
                 e.value.serialize(ser);
+            }
+            ast::Stmt::Assign(a) => {
+                ser.write_tag(TAG_ASSIGN);
+                a.targets.serialize(ser);
+                a.value.serialize(ser);
             }
             ast::Stmt::Import(i) => {
                 ser.write_tag(TAG_IMPORT);
