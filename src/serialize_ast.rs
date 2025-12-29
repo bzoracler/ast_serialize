@@ -76,10 +76,10 @@ pub(crate) fn main(args: &Args) -> Result<()> {
         parse(source_kind.source_code(), ParseOptions::from(source_type))?.into_syntax();
     let _ = start.elapsed();
     let line_index = LineIndex::from_source_text(source_kind.source_code());
-    let mut state = State { bytes: Vec::new(), imports: Vec::new(), line_index: &line_index, text: source_kind.source_code() };
-    python_ast.serialize(&mut state);
+    let mut ser = Serializer { bytes: Vec::new(), imports: Vec::new(), line_index: &line_index, text: source_kind.source_code() };
+    python_ast.serialize(&mut ser);
 
-    io::stdout().write_all(&state.bytes)?;
+    io::stdout().write_all(&ser.bytes)?;
 
     Ok(())
 }
@@ -90,7 +90,7 @@ struct Import {
     as_name: Option<String>,
 }
 
-struct State<'a> {
+struct Serializer<'a> {
     bytes: Vec<u8>,
     imports: Vec<Import>,
     line_index: & 'a LineIndex,
@@ -98,16 +98,16 @@ struct State<'a> {
 }
 
 trait Ser {
-    fn serialize(&self, state: &mut State);
+    fn serialize(&self, ser: &mut Serializer);
 }
 
 impl Ser for ast::Mod {
-    fn serialize(&self, state: &mut State) {
+    fn serialize(&self, ser: &mut Serializer) {
         match self {
             ast::Mod::Module(m) => {
-                write_tagged_int(&mut state.bytes, m.body.len() as i64);
+                write_tagged_int(&mut ser.bytes, m.body.len() as i64);
                 for stmt in &m.body {
-                    stmt.serialize(state);
+                    stmt.serialize(ser);
                 }
             }
             ast::Mod::Expression(_) => {
@@ -118,33 +118,33 @@ impl Ser for ast::Mod {
 }
 
 impl Ser for ast::Stmt {
-    fn serialize(&self, state: &mut State) {
+    fn serialize(&self, ser: &mut Serializer) {
         match self {
             ast::Stmt::Expr(e) => {
-                write_tag(&mut state.bytes, TAG_EXPR_STMT);
-                e.value.serialize(state);
+                write_tag(&mut ser.bytes, TAG_EXPR_STMT);
+                e.value.serialize(ser);
             }
             ast::Stmt::Import(i) => {
-                write_tag(&mut state.bytes, TAG_IMPORT);
+                write_tag(&mut ser.bytes, TAG_IMPORT);
                 for name in &i.names {
-                    write_bytes(&mut state.bytes, name.name.as_bytes());
-                    state.imports.push(Import { name: name.name.to_string(), relative: 0, as_name: None});
+                    write_bytes(&mut ser.bytes, name.name.as_bytes());
+                    ser.imports.push(Import { name: name.name.to_string(), relative: 0, as_name: None});
                 }
-                write_location(state, i.range());
+                write_location(ser, i.range());
             }
             ast::Stmt::If(s) => {
-                write_tag(&mut state.bytes, TAG_IF);
-                s.test.serialize(state);
-                serialize_block(state, &s.body);
-                write_usize(&mut state.bytes, s.elif_else_clauses.len());
+                write_tag(&mut ser.bytes, TAG_IF);
+                s.test.serialize(ser);
+                serialize_block(ser, &s.body);
+                write_usize(&mut ser.bytes, s.elif_else_clauses.len());
                 for ee in &s.elif_else_clauses {
                     match &ee.test {
                         Some(e) => {
-                            e.serialize(state);
-                            serialize_block(state, &ee.body);
+                            e.serialize(ser);
+                            serialize_block(ser, &ee.body);
                         }
                         None => {
-                            serialize_block(state, &ee.body);
+                            serialize_block(ser, &ee.body);
                         }
                     }
                 }
@@ -153,62 +153,62 @@ impl Ser for ast::Stmt {
                 panic!("unsupported: {self:?}");
             }
         };
-        write_end_tag(&mut state.bytes)
+        write_end_tag(&mut ser.bytes)
     }
 }
 
 impl Ser for ast::Expr {
-    fn serialize(&self, state: &mut State) {
+    fn serialize(&self, ser: &mut Serializer) {
         match self {
             ast::Expr::Name(n) => {
-                write_tag(&mut state.bytes, TAG_NAME_EXPR);
-                write_bytes(&mut state.bytes, n.id.as_bytes());
-                write_location(state, n.range());
+                write_tag(&mut ser.bytes, TAG_NAME_EXPR);
+                write_bytes(&mut ser.bytes, n.id.as_bytes());
+                write_location(ser, n.range());
             }
             ast::Expr::Attribute(a) => {
-                write_tag(&mut state.bytes, TAG_MEMBER_EXPR);
-                a.value.serialize(state);
-                write_bytes(&mut state.bytes, a.attr.as_bytes());
-                write_location(state, a.range());
+                write_tag(&mut ser.bytes, TAG_MEMBER_EXPR);
+                a.value.serialize(ser);
+                write_bytes(&mut ser.bytes, a.attr.as_bytes());
+                write_location(ser, a.range());
             }
             ast::Expr::StringLiteral(s) => {
-                write_tag(&mut state.bytes, TAG_STR_EXPR);
+                write_tag(&mut ser.bytes, TAG_STR_EXPR);
                 let value = &s.value;
-                write_tag(&mut state.bytes, TAG_LITERAL_STR);
-                write_usize(&mut state.bytes, value.len());
+                write_tag(&mut ser.bytes, TAG_LITERAL_STR);
+                write_usize(&mut ser.bytes, value.len());
                 for part in value.iter() {
-                    state.bytes.extend_from_slice(part.as_bytes());
+                    ser.bytes.extend_from_slice(part.as_bytes());
                 }
-                write_location(state, s.range());
+                write_location(ser, s.range());
             }
             ast::Expr::Call(c) => {
-                write_tag(&mut state.bytes, TAG_CALL_EXPR);
-                c.func.serialize(state);
+                write_tag(&mut ser.bytes, TAG_CALL_EXPR);
+                c.func.serialize(ser);
                 let args = &c.arguments;
-                write_tag(&mut state.bytes, TAG_LIST_GEN);
-                write_int(&mut state.bytes, args.len() as i64);
+                write_tag(&mut ser.bytes, TAG_LIST_GEN);
+                write_int(&mut ser.bytes, args.len() as i64);
                 for arg in &args.args {
-                    arg.serialize(state);
+                    arg.serialize(ser);
                 }
                 if args.keywords.len() > 0 {
                     // TODO: Keywords
                     panic!("unsupported: {:?}", args.keywords);
                 }
-                write_location(state, c.range());
+                write_location(ser, c.range());
             }
             ast::Expr::BinOp(b) => {
-                write_tag(&mut state.bytes, TAG_OP_EXPR);
-                state.bytes.push(b.op as u8);
-                b.left.serialize(state);
-                b.right.serialize(state);
+                write_tag(&mut ser.bytes, TAG_OP_EXPR);
+                ser.bytes.push(b.op as u8);
+                b.left.serialize(ser);
+                b.right.serialize(ser);
             }
             ast::Expr::NumberLiteral(n) => {
                 match &n.value {
                     Number::Int(n) => {
                         match n.as_i64() {
                             Some(x) => {
-                                write_tag(&mut state.bytes, TAG_INT_EXPR);
-                                write_tagged_int(&mut state.bytes, x);
+                                write_tag(&mut ser.bytes, TAG_INT_EXPR);
+                                write_tagged_int(&mut ser.bytes, x);
                             }
                             _ => {
                                 panic!("unsupported big int: {self:?}");
@@ -224,17 +224,17 @@ impl Ser for ast::Expr {
                 panic!("unsupported: {self:?}");
             }
         };
-        write_end_tag(&mut state.bytes)
+        write_end_tag(&mut ser.bytes)
     }
 }
 
-fn serialize_block(state: &mut State, block: &Vec<ast::Stmt>) {
-    write_tag(&mut state.bytes, TAG_BLOCK);
-    write_usize(&mut state.bytes, block.len());
+fn serialize_block(ser: &mut Serializer, block: &Vec<ast::Stmt>) {
+    write_tag(&mut ser.bytes, TAG_BLOCK);
+    write_usize(&mut ser.bytes, block.len());
     for stmt in block {
-        stmt.serialize(state);
+        stmt.serialize(ser);
     }
-    write_end_tag(&mut state.bytes);
+    write_end_tag(&mut ser.bytes);
 }
 
 #[inline]
@@ -291,16 +291,16 @@ fn write_bytes(w: &mut Vec<u8>, b: &[u8]) {
     w.extend_from_slice(b);
 }
 
-fn write_location(state: &mut State, range: TextRange) {
-    write_tag(&mut state.bytes, TAG_LOCATION);
-    let st_loc = state.line_index.line_column(range.start(), state.text);
+fn write_location(ser: &mut Serializer, range: TextRange) {
+    write_tag(&mut ser.bytes, TAG_LOCATION);
+    let st_loc = ser.line_index.line_column(range.start(), ser.text);
     let st_line = st_loc.line.get() as i64;
     let st_column = st_loc.column.get() as i64;
-    write_int(&mut state.bytes, st_line);
-    write_int(&mut state.bytes, st_column);
-    let end_loc = state.line_index.line_column(range.end(), state.text);
-    write_int(&mut state.bytes, (end_loc.line.get() as i64) - st_line);
-    write_int(&mut state.bytes, (end_loc.column.get() as i64) - st_column);
+    write_int(&mut ser.bytes, st_line);
+    write_int(&mut ser.bytes, st_column);
+    let end_loc = ser.line_index.line_column(range.end(), ser.text);
+    write_int(&mut ser.bytes, (end_loc.line.get() as i64) - st_line);
+    write_int(&mut ser.bytes, (end_loc.column.get() as i64) - st_column);
 }
 
 #[cfg(test)]
@@ -375,9 +375,9 @@ mod tests {
         let text = "print('hello')";
         let ast = parse(text, opt).unwrap().into_syntax();
         let index = LineIndex::from_source_text(text);
-        let mut state = State { bytes: Vec::new(), imports: Vec::new(), line_index: &index, text: text };
-        ast.serialize(&mut state);
-        let _ = state;  // TODO: drop when not needed
+        let mut ser = Serializer { bytes: Vec::new(), imports: Vec::new(), line_index: &index, text: text };
+        ast.serialize(&mut ser);
+        let _ = ser;  // TODO: drop when not needed
 
         let expected = &[
             TAG_LITERAL_INT,
@@ -423,6 +423,6 @@ mod tests {
             TAG_END,
         ];
 
-        assert_eq!(state.bytes, expected);
+        assert_eq!(ser.bytes, expected);
     }
 }
