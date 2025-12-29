@@ -114,9 +114,14 @@ impl<'a> Serializer<'a> {
         write_int(&mut self.bytes, i);
     }
 
+    #[inline]
+    fn write_usize(&mut self, i: usize) {
+        write_int(&mut self.bytes, i as i64);
+    }
+
     fn write_bytes(&mut self, b: &[u8]) {
         self.write_tag(TAG_LITERAL_STR);
-        write_usize(&mut self.bytes, b.len());
+        self.write_usize(b.len());
         self.bytes.extend_from_slice(b);
     }
 }
@@ -160,7 +165,7 @@ impl Ser for ast::Stmt {
                 ser.write_tag(TAG_IF);
                 s.test.serialize(ser);
                 serialize_block(ser, &s.body);
-                write_usize(&mut ser.bytes, s.elif_else_clauses.len());
+                ser.write_usize(s.elif_else_clauses.len());
                 for ee in &s.elif_else_clauses {
                     match &ee.test {
                         Some(e) => {
@@ -199,7 +204,7 @@ impl Ser for ast::Expr {
                 ser.write_tag(TAG_STR_EXPR);
                 let value = &s.value;
                 ser.write_tag(TAG_LITERAL_STR);
-                write_usize(&mut ser.bytes, value.len());
+                ser.write_usize(value.len());
                 for part in value.iter() {
                     ser.bytes.extend_from_slice(part.as_bytes());
                 }
@@ -254,7 +259,7 @@ impl Ser for ast::Expr {
 
 fn serialize_block(ser: &mut Serializer, block: &Vec<ast::Stmt>) {
     ser.write_tag(TAG_BLOCK);
-    write_usize(&mut ser.bytes, block.len());
+    ser.write_usize(block.len());
     for stmt in block {
         stmt.serialize(ser);
     }
@@ -286,11 +291,6 @@ fn write_int(w: &mut Vec<u8>, i: i64) {
         write_int(w, ((n as i64) << 1) | (neg as i64));
         w.extend_from_slice(&bytes[..n]);
     }
-}
-
-#[inline]
-fn write_usize(w: &mut Vec<u8>, i: usize) {
-    write_int(w, i as i64);
 }
 
 fn write_location(ser: &mut Serializer, range: TextRange) {
