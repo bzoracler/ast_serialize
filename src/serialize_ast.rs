@@ -97,6 +97,30 @@ struct Serializer<'a> {
     text: & 'a str
 }
 
+impl<'a> Serializer<'a> {
+    #[inline]
+    fn write_tag(&mut self, i: u8) {
+        self.bytes.push(i);
+    }
+
+    #[inline]
+    fn write_end_tag(&mut self) {
+        self.write_tag(TAG_END);
+    }
+
+    #[inline]
+    fn write_tagged_int(&mut self, i: i64) {
+        self.write_tag(TAG_LITERAL_INT);
+        write_int(&mut self.bytes, i);
+    }
+
+    fn write_bytes(&mut self, b: &[u8]) {
+        self.write_tag(TAG_LITERAL_STR);
+        write_usize(&mut self.bytes, b.len());
+        self.bytes.extend_from_slice(b);
+    }
+}
+
 trait Ser {
     fn serialize(&self, ser: &mut Serializer);
 }
@@ -105,7 +129,7 @@ impl Ser for ast::Mod {
     fn serialize(&self, ser: &mut Serializer) {
         match self {
             ast::Mod::Module(m) => {
-                write_tagged_int(&mut ser.bytes, m.body.len() as i64);
+                ser.write_tagged_int(m.body.len() as i64);
                 for stmt in &m.body {
                     stmt.serialize(ser);
                 }
@@ -121,19 +145,19 @@ impl Ser for ast::Stmt {
     fn serialize(&self, ser: &mut Serializer) {
         match self {
             ast::Stmt::Expr(e) => {
-                write_tag(&mut ser.bytes, TAG_EXPR_STMT);
+                ser.write_tag(TAG_EXPR_STMT);
                 e.value.serialize(ser);
             }
             ast::Stmt::Import(i) => {
-                write_tag(&mut ser.bytes, TAG_IMPORT);
+                ser.write_tag(TAG_IMPORT);
                 for name in &i.names {
-                    write_bytes(&mut ser.bytes, name.name.as_bytes());
+                    ser.write_bytes(name.name.as_bytes());
                     ser.imports.push(Import { name: name.name.to_string(), relative: 0, as_name: None});
                 }
                 write_location(ser, i.range());
             }
             ast::Stmt::If(s) => {
-                write_tag(&mut ser.bytes, TAG_IF);
+                ser.write_tag(TAG_IF);
                 s.test.serialize(ser);
                 serialize_block(ser, &s.body);
                 write_usize(&mut ser.bytes, s.elif_else_clauses.len());
@@ -153,7 +177,7 @@ impl Ser for ast::Stmt {
                 panic!("unsupported: {self:?}");
             }
         };
-        write_end_tag(&mut ser.bytes)
+        ser.write_end_tag()
     }
 }
 
@@ -161,20 +185,20 @@ impl Ser for ast::Expr {
     fn serialize(&self, ser: &mut Serializer) {
         match self {
             ast::Expr::Name(n) => {
-                write_tag(&mut ser.bytes, TAG_NAME_EXPR);
-                write_bytes(&mut ser.bytes, n.id.as_bytes());
+                ser.write_tag(TAG_NAME_EXPR);
+                ser.write_bytes(n.id.as_bytes());
                 write_location(ser, n.range());
             }
             ast::Expr::Attribute(a) => {
-                write_tag(&mut ser.bytes, TAG_MEMBER_EXPR);
+                ser.write_tag(TAG_MEMBER_EXPR);
                 a.value.serialize(ser);
-                write_bytes(&mut ser.bytes, a.attr.as_bytes());
+                ser.write_bytes(a.attr.as_bytes());
                 write_location(ser, a.range());
             }
             ast::Expr::StringLiteral(s) => {
-                write_tag(&mut ser.bytes, TAG_STR_EXPR);
+                ser.write_tag(TAG_STR_EXPR);
                 let value = &s.value;
-                write_tag(&mut ser.bytes, TAG_LITERAL_STR);
+                ser.write_tag(TAG_LITERAL_STR);
                 write_usize(&mut ser.bytes, value.len());
                 for part in value.iter() {
                     ser.bytes.extend_from_slice(part.as_bytes());
@@ -182,10 +206,10 @@ impl Ser for ast::Expr {
                 write_location(ser, s.range());
             }
             ast::Expr::Call(c) => {
-                write_tag(&mut ser.bytes, TAG_CALL_EXPR);
+                ser.write_tag(TAG_CALL_EXPR);
                 c.func.serialize(ser);
                 let args = &c.arguments;
-                write_tag(&mut ser.bytes, TAG_LIST_GEN);
+                ser.write_tag(TAG_LIST_GEN);
                 write_int(&mut ser.bytes, args.len() as i64);
                 for arg in &args.args {
                     arg.serialize(ser);
@@ -197,7 +221,7 @@ impl Ser for ast::Expr {
                 write_location(ser, c.range());
             }
             ast::Expr::BinOp(b) => {
-                write_tag(&mut ser.bytes, TAG_OP_EXPR);
+                ser.write_tag(TAG_OP_EXPR);
                 ser.bytes.push(b.op as u8);
                 b.left.serialize(ser);
                 b.right.serialize(ser);
@@ -207,8 +231,8 @@ impl Ser for ast::Expr {
                     Number::Int(n) => {
                         match n.as_i64() {
                             Some(x) => {
-                                write_tag(&mut ser.bytes, TAG_INT_EXPR);
-                                write_tagged_int(&mut ser.bytes, x);
+                                ser.write_tag(TAG_INT_EXPR);
+                                ser.write_tagged_int(x);
                             }
                             _ => {
                                 panic!("unsupported big int: {self:?}");
@@ -224,23 +248,17 @@ impl Ser for ast::Expr {
                 panic!("unsupported: {self:?}");
             }
         };
-        write_end_tag(&mut ser.bytes)
+        ser.write_end_tag()
     }
 }
 
 fn serialize_block(ser: &mut Serializer, block: &Vec<ast::Stmt>) {
-    write_tag(&mut ser.bytes, TAG_BLOCK);
+    ser.write_tag(TAG_BLOCK);
     write_usize(&mut ser.bytes, block.len());
     for stmt in block {
         stmt.serialize(ser);
     }
-    write_end_tag(&mut ser.bytes);
-}
-
-#[inline]
-fn write_tagged_int(w: &mut Vec<u8>, i: i64) {
-    write_tag(w, TAG_LITERAL_INT);
-    write_int(w, i);
+    ser.write_end_tag();
 }
 
 fn write_int(w: &mut Vec<u8>, i: i64) {
@@ -271,28 +289,12 @@ fn write_int(w: &mut Vec<u8>, i: i64) {
 }
 
 #[inline]
-fn write_tag(w: &mut Vec<u8>, i: u8) {
-    w.push(i);
-}
-
-#[inline]
-fn write_end_tag(w: &mut Vec<u8>) {
-    write_tag(w, TAG_END);
-}
-
-#[inline]
 fn write_usize(w: &mut Vec<u8>, i: usize) {
     write_int(w, i as i64);
 }
 
-fn write_bytes(w: &mut Vec<u8>, b: &[u8]) {
-    write_tag(w, TAG_LITERAL_STR);
-    write_usize(w, b.len());
-    w.extend_from_slice(b);
-}
-
 fn write_location(ser: &mut Serializer, range: TextRange) {
-    write_tag(&mut ser.bytes, TAG_LOCATION);
+    ser.write_tag(TAG_LOCATION);
     let st_loc = ser.line_index.line_column(range.start(), ser.text);
     let st_line = st_loc.line.get() as i64;
     let st_column = st_loc.column.get() as i64;
