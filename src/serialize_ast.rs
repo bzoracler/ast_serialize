@@ -449,12 +449,16 @@ impl Ser for ast::Expr {
                 c.func.serialize(ser);
                 let args = &c.arguments;
 
-                // Serialize all arguments (positional + keyword)
+                // Serialize all arguments (positional + keyword + **kwargs)
                 let total_args = args.args.len() + args.keywords.len();
                 ser.write_tag(TAG_LIST_GEN);
                 ser.write_int(total_args as i64);
                 for arg in &args.args {
-                    arg.serialize(ser);
+                    // Unwrap starred expressions
+                    match arg {
+                        ast::Expr::Starred(starred) => starred.value.serialize(ser),
+                        _ => arg.serialize(ser),
+                    }
                 }
                 for kwarg in &args.keywords {
                     kwarg.value.serialize(ser);
@@ -463,11 +467,18 @@ impl Ser for ast::Expr {
                 // Serialize argument kinds
                 ser.write_tag(TAG_LIST_INT);
                 ser.write_int(total_args as i64);
-                for _ in &args.args {
-                    ser.write_int(ARG_POS);
+                for arg in &args.args {
+                    match arg {
+                        ast::Expr::Starred(_) => ser.write_int(ARG_STAR),
+                        _ => ser.write_int(ARG_POS),
+                    }
                 }
-                for _ in &args.keywords {
-                    ser.write_int(ARG_NAMED);
+                for kwarg in &args.keywords {
+                    if kwarg.arg.is_none() {
+                        ser.write_int(ARG_STAR2);  // **kwargs
+                    } else {
+                        ser.write_int(ARG_NAMED);  // keyword arg
+                    }
                 }
 
                 // Serialize argument names
