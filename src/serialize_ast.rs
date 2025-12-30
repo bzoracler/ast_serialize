@@ -58,6 +58,7 @@ const TAG_CLASS_DEF: u8 = 60;
 const TAG_FLOAT_EXPR: u8 = 181;
 const TAG_UNARY_EXPR: u8 = 182;
 const TAG_DICT_EXPR: u8 = 183;
+const TAG_COMPLEX_EXPR: u8 = 184;
 
 // Argument kinds (must match mypy/nodes.py)
 const ARG_POS: i64 = 0;        // Positional argument
@@ -560,6 +561,15 @@ impl Ser for ast::Expr {
                         ser.write_tag(TAG_FLOAT_EXPR);
                         ser.write_tag(TAG_LITERAL_FLOAT);
                         ser.bytes.extend_from_slice(&f.to_le_bytes());
+                    }
+                    Number::Complex { real, imag } => {
+                        ser.write_tag(TAG_COMPLEX_EXPR);
+                        // Serialize real part
+                        ser.write_tag(TAG_LITERAL_FLOAT);
+                        ser.bytes.extend_from_slice(&real.to_le_bytes());
+                        // Serialize imaginary part
+                        ser.write_tag(TAG_LITERAL_FLOAT);
+                        ser.bytes.extend_from_slice(&imag.to_le_bytes());
                     }
                     _ => {
                         panic!("unsupported number: {self:?}");
