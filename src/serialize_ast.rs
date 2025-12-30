@@ -448,15 +448,42 @@ impl Ser for ast::Expr {
                 ser.write_tag(TAG_CALL_EXPR);
                 c.func.serialize(ser);
                 let args = &c.arguments;
+
+                // Serialize all arguments (positional + keyword)
+                let total_args = args.args.len() + args.keywords.len();
                 ser.write_tag(TAG_LIST_GEN);
-                ser.write_int(args.len() as i64);
+                ser.write_int(total_args as i64);
                 for arg in &args.args {
                     arg.serialize(ser);
                 }
-                if args.keywords.len() > 0 {
-                    // TODO: Keywords
-                    panic!("unsupported: {:?}", args.keywords);
+                for kwarg in &args.keywords {
+                    kwarg.value.serialize(ser);
                 }
+
+                // Serialize argument kinds
+                ser.write_tag(TAG_LIST_INT);
+                ser.write_int(total_args as i64);
+                for _ in &args.args {
+                    ser.write_int(ARG_POS);
+                }
+                for _ in &args.keywords {
+                    ser.write_int(ARG_NAMED);
+                }
+
+                // Serialize argument names
+                ser.write_tag(TAG_LIST_GEN);
+                ser.write_int(total_args as i64);
+                for _ in &args.args {
+                    ser.write_tag(TAG_LITERAL_NONE);
+                }
+                for kwarg in &args.keywords {
+                    if let Some(arg_name) = &kwarg.arg {
+                        ser.write_bytes(arg_name.as_bytes());
+                    } else {
+                        ser.write_tag(TAG_LITERAL_NONE);
+                    }
+                }
+
                 ser.write_location(c.range());
             }
             ast::Expr::BinOp(e) => {
@@ -674,6 +701,12 @@ mod tests {
             int_val(0),
             int_val(7),
             TAG_END,
+            TAG_LIST_INT,
+            int_val(1),
+            int_val(0),  // ARG_POS
+            TAG_LIST_GEN,
+            int_val(1),
+            TAG_LITERAL_NONE,
             TAG_LOCATION,
             int_val(1),
             int_val(1),
