@@ -55,6 +55,7 @@ const TAG_BOOL_OP_EXPR: u8 = 178;
 const TAG_FUNC_DEF: u8 = 179;
 const TAG_PASS_STMT: u8 = 180;
 const TAG_CLASS_DEF: u8 = 60;
+const TAG_FLOAT_EXPR: u8 = 181;
 
 // Argument kinds (must match mypy/nodes.py)
 const ARG_POS: i64 = 0;        // Positional argument
@@ -552,6 +553,11 @@ impl Ser for ast::Expr {
                                 panic!("unsupported big int: {self:?}");
                             }
                         }
+                    }
+                    Number::Float(f) => {
+                        ser.write_tag(TAG_FLOAT_EXPR);
+                        ser.write_tag(TAG_LITERAL_FLOAT);
+                        ser.bytes.extend_from_slice(&f.to_le_bytes());
                     }
                     _ => {
                         panic!("unsupported number: {self:?}");
