@@ -52,6 +52,15 @@ const TAG_RETURN: u8 = 175;
 const TAG_WHILE: u8 = 176;
 const TAG_COMPARISON_EXPR: u8 = 177;
 const TAG_BOOL_OP_EXPR: u8 = 178;
+const TAG_FUNC_DEF: u8 = 179;
+
+// Argument kinds (must match mypy/nodes.py)
+const ARG_POS: i64 = 0;        // Positional argument
+const ARG_OPT: i64 = 1;        // Positional argument with default
+const ARG_STAR: i64 = 2;       // *args
+const ARG_NAMED: i64 = 3;      // Keyword-only argument
+const ARG_STAR2: i64 = 4;      // **kwargs
+const ARG_NAMED_OPT: i64 = 5;  // Keyword-only argument with default
 
 const MIN_SHORT_INT: i64 = -10;
 const MIN_TWO_BYTES_INT: i64 = -100;
@@ -237,9 +246,108 @@ impl Ser for ast::Mod {
     }
 }
 
+fn serialize_parameters(ser: &mut Serializer, params: &ast::Parameters) {
+    // Count total number of arguments
+    let mut arg_count = 0;
+    arg_count += params.posonlyargs.len();
+    arg_count += params.args.len();
+    if params.vararg.is_some() {
+        arg_count += 1;
+    }
+    arg_count += params.kwonlyargs.len();
+    if params.kwarg.is_some() {
+        arg_count += 1;
+    }
+
+    // Write argument list
+    ser.write_tag(TAG_LIST_GEN);
+    ser.write_int(arg_count as i64);
+
+    // Serialize positional-only arguments
+    for param in &params.posonlyargs {
+        serialize_argument(ser, &param.parameter, param.default.is_some(), ARG_POS, ARG_OPT, true);
+    }
+
+    // Serialize regular positional arguments
+    for param in &params.args {
+        serialize_argument(ser, &param.parameter, param.default.is_some(), ARG_POS, ARG_OPT, false);
+    }
+
+    // Serialize *args
+    if let Some(vararg) = &params.vararg {
+        serialize_argument(ser, vararg, false, ARG_STAR, ARG_STAR, false);
+    }
+
+    // Serialize keyword-only arguments
+    for param in &params.kwonlyargs {
+        serialize_argument(ser, &param.parameter, param.default.is_some(), ARG_NAMED, ARG_NAMED_OPT, false);
+    }
+
+    // Serialize **kwargs
+    if let Some(kwarg) = &params.kwarg {
+        serialize_argument(ser, kwarg, false, ARG_STAR2, ARG_STAR2, false);
+    }
+}
+
+fn serialize_argument(
+    ser: &mut Serializer,
+    param: &ast::Parameter,
+    has_default: bool,
+    kind_no_default: i64,
+    kind_with_default: i64,
+    pos_only: bool,
+) {
+    // Argument name
+    ser.write_bytes(param.name.as_bytes());
+
+    // Argument kind
+    let kind = if has_default {
+        kind_with_default
+    } else {
+        kind_no_default
+    };
+    ser.write_tagged_int(kind);
+
+    // TODO: Type annotation (skip for now)
+    ser.write_bool(false);
+
+    // TODO: Default value (skip for now)
+    ser.write_bool(false);
+
+    // pos_only flag
+    ser.write_bool(pos_only);
+}
+
 impl Ser for ast::Stmt {
     fn serialize(&self, ser: &mut Serializer) {
         match self {
+            ast::Stmt::FunctionDef(f) => {
+                ser.write_tag(TAG_FUNC_DEF);
+
+                // Function name
+                ser.write_bytes(f.name.as_bytes());
+
+                // Arguments
+                serialize_parameters(ser, &f.parameters);
+
+                // Body
+                ser.serialize_block(&f.body);
+
+                // TODO: Decorators (skip for now)
+                ser.write_tag(TAG_LIST_GEN);
+                ser.write_int(0); // Empty decorator list
+
+                // is_async
+                ser.write_bool(f.is_async);
+
+                // TODO: type_params (skip for now)
+                ser.write_bool(false); // No type params
+
+                // TODO: Return type annotation (skip for now)
+                ser.write_bool(false); // No return annotation
+
+                ser.write_location(f.range());
+            }
             ast::Stmt::Expr(e) => {
                 ser.write_tag(TAG_EXPR_STMT);
                 e.value.serialize(ser);
