@@ -54,6 +54,7 @@ const TAG_COMPARISON_EXPR: u8 = 177;
 const TAG_BOOL_OP_EXPR: u8 = 178;
 const TAG_FUNC_DEF: u8 = 179;
 const TAG_PASS_STMT: u8 = 180;
+const TAG_CLASS_DEF: u8 = 60;
 
 // Argument kinds (must match mypy/nodes.py)
 const ARG_POS: i64 = 0;        // Positional argument
@@ -411,6 +412,35 @@ impl Ser for ast::Stmt {
             ast::Stmt::Pass(s) => {
                 ser.write_tag(TAG_PASS_STMT);
                 ser.write_location(s.range());
+            }
+            ast::Stmt::ClassDef(c) => {
+                ser.write_tag(TAG_CLASS_DEF);
+
+                // Class name
+                ser.write_bytes(c.name.as_bytes());
+
+                // Body
+                ser.serialize_block(&c.body);
+
+                // TODO: Base classes (skip for now)
+                ser.write_tag(TAG_LIST_GEN);
+                ser.write_int(0); // Empty base class list
+
+                // TODO: Decorators (skip for now)
+                ser.write_tag(TAG_LIST_GEN);
+                ser.write_int(0); // Empty decorator list
+
+                // TODO: Type parameters (skip for now)
+                ser.write_bool(false); // No type params
+
+                // TODO: Metaclass (skip for now)
+                ser.write_bool(false); // No metaclass
+
+                // TODO: Keywords (skip for now)
+                ser.write_tag(TAG_DICT_STR_GEN);
+                ser.write_int(0); // Empty keywords dict
+
+                ser.write_location(c.range());
             }
             _ => {
                 panic!("unsupported: {self:?}");
