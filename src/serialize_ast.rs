@@ -61,6 +61,7 @@ const TAG_DICT_EXPR: u8 = 183;
 const TAG_COMPLEX_EXPR: u8 = 184;
 const TAG_SLICE_EXPR: u8 = 185;
 const TAG_TEMP_NODE: u8 = 186;
+const TAG_RAISE_STMT: u8 = 187;
 const TAG_UNBOUND_TYPE: u8 = 104;
 const TAG_UNION_TYPE: u8 = 115;
 
@@ -528,6 +529,14 @@ impl Ser for ast::Stmt {
                 ser.write_tag(TAG_RETURN);
                 s.value.serialize(ser);
                 ser.write_location(s.range());
+            }
+            ast::Stmt::Raise(r) => {
+                ser.write_tag(TAG_RAISE_STMT);
+                // Serialize exception expression (optional)
+                r.exc.serialize(ser);
+                // Serialize from expression (optional)
+                r.cause.serialize(ser);
+                ser.write_location(r.range());
             }
             ast::Stmt::If(s) => {
                 ser.write_tag(TAG_IF);
