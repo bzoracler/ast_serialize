@@ -346,14 +346,38 @@ fn serialize_simple_unbound_type(ser: &mut Serializer, name: &[u8]) {
     ser.write_tag(TAG_LITERAL_NONE);
 }
 
+fn get_qualified_type_name(v: &mut Vec<u8>, e: &ast::Expr) {
+    match e {
+        ast::Expr::Name(e) => {
+            v.extend_from_slice(e.id.as_bytes());
+        }
+        ast::Expr::Attribute(e) => {
+            get_qualified_type_name(v, &e.value);
+            v.extend_from_slice(b".");
+            v.extend_from_slice(e.attr.as_bytes());
+        }
+        _ => {
+            panic!("unimplemented")
+        }
+    }
+}
+
 fn serialize_type(ser: &mut Serializer, t: &ast::Expr) {
     match t {
         ast::Expr::Name(e) => {
             serialize_simple_unbound_type(ser, e.id.as_bytes());
         }
         ast::Expr::Attribute(e) => {
-            // TODO
-            panic!("unimplemented");
+            ser.write_tag(TAG_UNBOUND_TYPE);
+            let mut v = Vec::new();
+            get_qualified_type_name(&mut v, &t);
+            ser.write_bytes(&v);
+            ser.write_tag(TAG_LIST_GEN);
+            ser.write_int(0);
+            // Write None for original_str_expr (optional field)
+            ser.write_tag(TAG_LITERAL_NONE);
+            // Write None for original_str_fallback (optional field)
+            ser.write_tag(TAG_LITERAL_NONE);
         }
         ast::Expr::Subscript(e) => {
             // TODO
