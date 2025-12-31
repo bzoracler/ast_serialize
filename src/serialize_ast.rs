@@ -61,6 +61,7 @@ const TAG_DICT_EXPR: u8 = 183;
 const TAG_COMPLEX_EXPR: u8 = 184;
 const TAG_SLICE_EXPR: u8 = 185;
 const TAG_UNBOUND_TYPE: u8 = 104;
+const TAG_UNION_TYPE: u8 = 115;
 
 // Argument kinds (must match mypy/nodes.py)
 const ARG_POS: i64 = 0;        // Positional argument
@@ -406,8 +407,19 @@ fn serialize_type(ser: &mut Serializer, t: &ast::Expr) {
             serialize_simple_unbound_type(ser, b"None");
         }
         ast::Expr::BinOp(e) => {
-            // TODO
-            panic!("unimplemented");
+            // Handle union types (x | y)
+            if matches!(e.op, ast::Operator::BitOr) {
+                ser.write_tag(TAG_UNION_TYPE);
+                // Serialize items list with exactly two items (left and right)
+                ser.write_tag(TAG_LIST_GEN);
+                ser.write_int(2);
+                serialize_type(ser, &e.left);
+                serialize_type(ser, &e.right);
+                // uses_pep604_syntax = true (using | operator)
+                ser.write_bool(true);
+            } else {
+                panic!("unsupported binary operator in type: {:?}", e.op);
+            }
         }
         _ => {
             panic!("unsupported type: {t:?}");
