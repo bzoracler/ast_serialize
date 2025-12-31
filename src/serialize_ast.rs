@@ -110,15 +110,16 @@ pub(crate) fn main(args: &Args) -> Result<()> {
     Ok(())
 }
 
+// Used to report which imports are used in a file
 struct Import {
     name: String,
-    relative: i32,
-    as_name: Option<String>,
+    relative: i32,  // Number of dots in relative import 'import ..x'
+    as_name: Option<String>,  // Set for 'import x as y'
 }
 
 struct Serializer<'a> {
     bytes: Vec<u8>,
-    imports: Vec<Import>,
+    imports: Vec<Import>,  // Encountered import statements
     line_index: LineIndex,
     text: & 'a str
 }
@@ -503,9 +504,23 @@ impl Ser for ast::Stmt {
             }
             ast::Stmt::Import(i) => {
                 ser.write_tag(TAG_IMPORT);
+                // Write number of imports
+                ser.write_tagged_int(i.names.len() as i64);
                 for name in &i.names {
+                    // Write import name
                     ser.write_bytes(name.name.as_bytes());
-                    ser.imports.push(Import { name: name.name.to_string(), relative: 0, as_name: None});
+                    // Write as_name (optional)
+                    if let Some(asname) = &name.asname {
+                        ser.write_bool(true);
+                        ser.write_bytes(asname.as_bytes());
+                    } else {
+                        ser.write_bool(false);
+                    }
+                    ser.imports.push(Import {
+                        name: name.name.to_string(),
+                        relative: 0,  // Not a relative import
+                        as_name: name.asname.as_ref().map(|n| n.to_string())
+                    });
                 }
                 ser.write_location(i.range());
             }
