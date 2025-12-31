@@ -65,6 +65,8 @@ const TAG_RAISE_STMT: u8 = 187;
 const TAG_BREAK_STMT: u8 = 188;
 const TAG_CONTINUE_STMT: u8 = 189;
 const TAG_GENERATOR_EXPR: u8 = 190;
+const TAG_YIELD_EXPR: u8 = 191;
+const TAG_YIELD_FROM_EXPR: u8 = 192;
 const TAG_UNBOUND_TYPE: u8 = 104;
 const TAG_UNION_TYPE: u8 = 115;
 
@@ -785,6 +787,18 @@ impl Ser for ast::Expr {
                     ser.write_bool(comp.is_async);
                 }
                 ser.write_location(g.range());
+            }
+            ast::Expr::Yield(y) => {
+                ser.write_tag(TAG_YIELD_EXPR);
+                // Serialize optional value expression
+                y.value.serialize(ser);
+                ser.write_location(y.range());
+            }
+            ast::Expr::YieldFrom(y) => {
+                ser.write_tag(TAG_YIELD_FROM_EXPR);
+                // Serialize value expression (required for yield from)
+                y.value.serialize(ser);
+                ser.write_location(y.range());
             }
             ast::Expr::BoolOp(e) => {
                 ser.write_tag(TAG_BOOL_OP_EXPR);
