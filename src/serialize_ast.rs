@@ -380,8 +380,27 @@ fn serialize_type(ser: &mut Serializer, t: &ast::Expr) {
             ser.write_tag(TAG_LITERAL_NONE);
         }
         ast::Expr::Subscript(e) => {
-            // TODO
-            panic!("unimplemented");
+            ser.write_tag(TAG_UNBOUND_TYPE);
+            let mut v = Vec::new();
+            get_qualified_type_name(&mut v, &e.value);
+            ser.write_bytes(&v);
+            ser.write_tag(TAG_LIST_GEN);
+            match e.slice.as_ref() {
+                ast::Expr::Tuple(t) => {
+                    ser.write_usize(t.len());
+                    for item in &t.elts {
+                        serialize_type(ser, item);
+                    }
+                }
+                _ => {
+                    ser.write_int(1);
+                    serialize_type(ser, &e.slice);
+                }
+            }
+            // Write None for original_str_expr (optional field)
+            ser.write_tag(TAG_LITERAL_NONE);
+            // Write None for original_str_fallback (optional field)
+            ser.write_tag(TAG_LITERAL_NONE);
         }
         ast::Expr::NoneLiteral(_) => {
             serialize_simple_unbound_type(ser, b"None");
