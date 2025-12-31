@@ -64,6 +64,7 @@ const TAG_TEMP_NODE: u8 = 186;
 const TAG_RAISE_STMT: u8 = 187;
 const TAG_BREAK_STMT: u8 = 188;
 const TAG_CONTINUE_STMT: u8 = 189;
+const TAG_GENERATOR_EXPR: u8 = 190;
 const TAG_UNBOUND_TYPE: u8 = 104;
 const TAG_UNION_TYPE: u8 = 115;
 
@@ -760,6 +761,30 @@ impl Ser for ast::Expr {
                 ser.write_tag(TAG_SET_EXPR);
                 e.elts.serialize(ser);
                 ser.write_location(e.range());
+            }
+            ast::Expr::Generator(g) => {
+                ser.write_tag(TAG_GENERATOR_EXPR);
+                // Serialize element expression
+                g.elt.serialize(ser);
+                // Serialize number of generators
+                ser.write_tagged_int(g.generators.len() as i64);
+                // Serialize all indices (targets)
+                for comp in &g.generators {
+                    comp.target.serialize(ser);
+                }
+                // Serialize all sequences (iters)
+                for comp in &g.generators {
+                    comp.iter.serialize(ser);
+                }
+                // Serialize all condlists (ifs for each generator)
+                for comp in &g.generators {
+                    comp.ifs.serialize(ser);
+                }
+                // Serialize all is_async flags
+                for comp in &g.generators {
+                    ser.write_bool(comp.is_async);
+                }
+                ser.write_location(g.range());
             }
             ast::Expr::BoolOp(e) => {
                 ser.write_tag(TAG_BOOL_OP_EXPR);
