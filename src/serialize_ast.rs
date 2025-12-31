@@ -60,6 +60,7 @@ const TAG_UNARY_EXPR: u8 = 182;
 const TAG_DICT_EXPR: u8 = 183;
 const TAG_COMPLEX_EXPR: u8 = 184;
 const TAG_SLICE_EXPR: u8 = 185;
+const TAG_TEMP_NODE: u8 = 186;
 const TAG_UNBOUND_TYPE: u8 = 104;
 const TAG_UNION_TYPE: u8 = 115;
 
@@ -472,6 +473,32 @@ impl Ser for ast::Stmt {
                 ser.write_tag(TAG_ASSIGN);
                 a.targets.serialize(ser);
                 a.value.serialize(ser);
+                // No type annotation
+                ser.write_bool(false);
+                // new_syntax = false (not using PEP 526 syntax)
+                ser.write_bool(false);
+                ser.write_location(a.range());
+            }
+            ast::Stmt::AnnAssign(a) => {
+                ser.write_tag(TAG_ASSIGN);
+                // Serialize target as a single-element list
+                ser.write_tag(TAG_LIST_GEN);
+                ser.write_int(1);
+                a.target.serialize(ser);
+                // Serialize value (or TempNode if annotation-only)
+                if let Some(value) = &a.value {
+                    value.serialize(ser);
+                } else {
+                    // For annotation-only (x: int), serialize as TempNode
+                    ser.write_tag(TAG_TEMP_NODE);
+                    ser.write_end_tag();
+                }
+                // has_type = true
+                ser.write_bool(true);
+                // Serialize type annotation
+                serialize_type(ser, &a.annotation);
+                // new_syntax = true (using PEP 526 syntax)
+                ser.write_bool(true);
                 ser.write_location(a.range());
             }
             ast::Stmt::Import(i) => {
