@@ -16,7 +16,8 @@ crate-type = ["cdylib"]
 
 [dependencies]
 # PyO3 for Python bindings
-pyo3 = { version = "0.23", features = ["extension-module"] }
+# abi3-py39 enables stable ABI for Python 3.9+
+pyo3 = { version = "0.23", features = ["extension-module", "abi3-py39"] }
 
 # Ruff dependencies for parsing Python
 ruff_linter = { workspace = true }
