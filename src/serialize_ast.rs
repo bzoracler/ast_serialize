@@ -77,6 +77,7 @@ const TAG_WITH_STMT: u8 = 199;
 const TAG_OPERATOR_ASSIGNMENT_STMT: u8 = 200;
 const TAG_TRY_STMT: u8 = 201;
 const TAG_ELLIPSIS_EXPR: u8 = 202;
+const TAG_CONDITIONAL_EXPR: u8 = 203;
 const TAG_UNBOUND_TYPE: u8 = 104;
 const TAG_UNION_TYPE: u8 = 115;
 
@@ -1077,6 +1078,16 @@ impl Ser for ast::Expr {
             ast::Expr::EllipsisLiteral(e) => {
                 ser.write_tag(TAG_ELLIPSIS_EXPR);
                 ser.write_location(e.range());
+            }
+            ast::Expr::If(i) => {
+                ser.write_tag(TAG_CONDITIONAL_EXPR);
+                // Serialize if_expr (body - value when condition is true)
+                i.body.serialize(ser);
+                // Serialize cond (test - the condition)
+                i.test.serialize(ser);
+                // Serialize else_expr (orelse - value when condition is false)
+                i.orelse.serialize(ser);
+                ser.write_location(i.range());
             }
             ast::Expr::UnaryOp(u) => {
                 ser.write_tag(TAG_UNARY_EXPR);
