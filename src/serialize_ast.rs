@@ -69,6 +69,7 @@ const TAG_LIST_COMPREHENSION: u8 = 193;
 const TAG_SET_COMPREHENSION: u8 = 194;
 const TAG_DICT_COMPREHENSION: u8 = 195;
 const TAG_IMPORT_FROM: u8 = 196;
+const TAG_ASSERT_STMT: u8 = 197;
 const TAG_UNBOUND_TYPE: u8 = 104;
 const TAG_UNION_TYPE: u8 = 115;
 
@@ -625,6 +626,14 @@ impl Ser for ast::Stmt {
                 // Serialize from expression (optional)
                 r.cause.serialize(ser);
                 ser.write_location(r.range());
+            }
+            ast::Stmt::Assert(a) => {
+                ser.write_tag(TAG_ASSERT_STMT);
+                // Serialize test expression
+                a.test.serialize(ser);
+                // Serialize optional message expression
+                a.msg.serialize(ser);
+                ser.write_location(a.range());
             }
             ast::Stmt::If(s) => {
                 ser.write_tag(TAG_IF);
