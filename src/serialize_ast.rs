@@ -71,6 +71,7 @@ const TAG_DICT_COMPREHENSION: u8 = 195;
 const TAG_IMPORT_FROM: u8 = 196;
 const TAG_ASSERT_STMT: u8 = 197;
 const TAG_FOR_STMT: u8 = 198;
+const TAG_WITH_STMT: u8 = 199;
 const TAG_UNBOUND_TYPE: u8 = 104;
 const TAG_UNION_TYPE: u8 = 115;
 
@@ -678,6 +679,21 @@ impl Ser for ast::Stmt {
                 // Serialize else clause
                 ser.serialize_block(&f.orelse);
                 ser.write_location(f.range());
+            }
+            ast::Stmt::With(w) => {
+                ser.write_tag(TAG_WITH_STMT);
+                // Write number of items
+                ser.write_tagged_int(w.items.len() as i64);
+                // Serialize each item
+                for item in &w.items {
+                    // Serialize context expression
+                    item.context_expr.serialize(ser);
+                    // Serialize optional target
+                    item.optional_vars.serialize(ser);
+                }
+                // Serialize body
+                ser.serialize_block(&w.body);
+                ser.write_location(w.range());
             }
             ast::Stmt::Pass(s) => {
                 ser.write_tag(TAG_PASS_STMT);
