@@ -68,6 +68,7 @@ const TAG_YIELD_FROM_EXPR: u8 = 192;
 const TAG_LIST_COMPREHENSION: u8 = 193;
 const TAG_SET_COMPREHENSION: u8 = 194;
 const TAG_DICT_COMPREHENSION: u8 = 195;
+const TAG_IMPORT_FROM: u8 = 196;
 const TAG_UNBOUND_TYPE: u8 = 104;
 const TAG_UNION_TYPE: u8 = 115;
 
@@ -113,7 +114,7 @@ pub fn serialize_python_file(file_path: &Path) -> Result<Vec<u8>> {
     let python_ast =
         parse(source_kind.source_code(), ParseOptions::from(source_type))?.into_syntax();
     let line_index = LineIndex::from_source_text(source_kind.source_code());
-    let mut ser = Serializer { bytes: Vec::new(), imports: Vec::new(), line_index: line_index, text: source_kind.source_code() };
+    let mut ser = Serializer { bytes: Vec::new(), imports: Vec::new(), import_froms: Vec::new(), line_index: line_index, text: source_kind.source_code() };
     python_ast.serialize(&mut ser);
 
     Ok(ser.bytes)
@@ -126,9 +127,17 @@ struct Import {
     as_name: Option<String>,  // Set for 'import x as y'
 }
 
+// Used to report which from...import statements are used in a file
+struct ImportFrom {
+    module: String,  // Module being imported from (empty string for "from . import x")
+    relative: i32,   // Number of dots in relative import
+    names: Vec<(String, Option<String>)>,  // List of (name, as_name) tuples
+}
+
 struct Serializer<'a> {
     bytes: Vec<u8>,
     imports: Vec<Import>,  // Encountered import statements
+    import_froms: Vec<ImportFrom>,  // Encountered from...import statements
     line_index: LineIndex,
     text: & 'a str
 }
@@ -563,6 +572,47 @@ impl Ser for ast::Stmt {
                 }
                 ser.write_location(i.range());
             }
+            ast::Stmt::ImportFrom(ifrom) => {
+                ser.write_tag(TAG_IMPORT_FROM);
+
+                // Write relative import level (number of dots)
+                ser.write_tagged_int(ifrom.level as i64);
+
+                // Write module name (empty string for "from . import x")
+                ser.write_bytes(ifrom.module.as_ref().map_or(b"", |m| m.as_bytes()));
+
+                // Write number of imported names
+                ser.write_tagged_int(ifrom.names.len() as i64);
+
+                // Collect names for dependency tracking
+                let mut names = Vec::new();
+
+                // Write each name and optional alias
+                for alias in &ifrom.names {
+                    ser.write_bytes(alias.name.as_bytes());
+                    if let Some(asname) = &alias.asname {
+                        ser.write_bool(true);
+                        ser.write_bytes(asname.as_bytes());
+                    } else {
+                        ser.write_bool(false);
+                    }
+
+                    // Collect for dependency tracking
+                    names.push((
+                        alias.name.to_string(),
+                        alias.asname.as_ref().map(|n| n.to_string())
+                    ));
+                }
+
+                // Track in import_froms list for dependency tracking
+                ser.import_froms.push(ImportFrom {
+                    module: ifrom.module.as_ref().map_or(String::new(), |m| m.to_string()),
+                    relative: ifrom.level as i32,
+                    names,
+                });
+
+                ser.write_location(ifrom.range());
+            }
             ast::Stmt::Return(s) => {
                 ser.write_tag(TAG_RETURN);
                 s.value.serialize(ser);
@@ -950,7 +1000,7 @@ mod tests {
 
     fn make_ser<'a>(text: &'a str) -> Serializer<'a> {
         let index = LineIndex::from_source_text(text);
-        Serializer { bytes: Vec::new(), imports: Vec::new(), line_index: index, text: text }
+        Serializer { bytes: Vec::new(), imports: Vec::new(), import_froms: Vec::new(), line_index: index, text: text }
     }
 
     #[test]
@@ -1017,7 +1067,7 @@ mod tests {
         let text = "print('hello')";
         let ast = parse(text, opt).unwrap().into_syntax();
         let index = LineIndex::from_source_text(text);
-        let mut ser = Serializer { bytes: Vec::new(), imports: Vec::new(), line_index: index, text: text };
+        let mut ser = Serializer { bytes: Vec::new(), imports: Vec::new(), import_froms: Vec::new(), line_index: index, text: text };
         ast.serialize(&mut ser);
         let _ = ser;  // TODO: drop when not needed
 
