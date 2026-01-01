@@ -27,6 +27,9 @@ const TAG_LIST_STR: u8      = 22;
 const TAG_LIST_BYTES: u8    = 23;
 const TAG_DICT_STR_GEN: u8  = 30;
 
+const TAG_DECORATOR: u8 = 53;
+const TAG_CLASS_DEF: u8 = 60;
+
 // End tag for composite objects
 const TAG_END: u8 = 255;
 
@@ -52,7 +55,6 @@ const TAG_COMPARISON_EXPR: u8 = 177;
 const TAG_BOOL_OP_EXPR: u8 = 178;
 const TAG_FUNC_DEF: u8 = 179;
 const TAG_PASS_STMT: u8 = 180;
-const TAG_CLASS_DEF: u8 = 60;
 const TAG_FLOAT_EXPR: u8 = 181;
 const TAG_UNARY_EXPR: u8 = 182;
 const TAG_DICT_EXPR: u8 = 183;
@@ -486,6 +488,16 @@ impl Ser for ast::Stmt {
     fn serialize(&self, ser: &mut Serializer) {
         match self {
             ast::Stmt::FunctionDef(f) => {
+                if !f.decorator_list.is_empty() {
+                    ser.write_tag(TAG_DECORATOR);
+                    // Serialize decorators
+                    ser.write_tag(TAG_LIST_GEN);
+                    ser.write_usize(f.decorator_list.len());
+                    for dec in &f.decorator_list {
+                        dec.expression.serialize(ser);
+                    }
+                }
+
                 ser.write_tag(TAG_FUNC_DEF);
 
                 // Function name
@@ -516,6 +528,11 @@ impl Ser for ast::Stmt {
                 }
 
                 ser.write_location(f.range());
+
+                if !f.decorator_list.is_empty() {
+                    // Extra end tag for the Decorator wrapper in mypy AST
+                    ser.write_end_tag();
+                }
             }
             ast::Stmt::Expr(e) => {
                 ser.write_tag(TAG_EXPR_STMT);
