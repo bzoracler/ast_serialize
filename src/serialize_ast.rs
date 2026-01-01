@@ -75,6 +75,7 @@ const TAG_ASSERT_STMT: u8 = 197;
 const TAG_FOR_STMT: u8 = 198;
 const TAG_WITH_STMT: u8 = 199;
 const TAG_OPERATOR_ASSIGNMENT_STMT: u8 = 200;
+const TAG_TRY_STMT: u8 = 201;
 const TAG_UNBOUND_TYPE: u8 = 104;
 const TAG_UNION_TYPE: u8 = 115;
 
@@ -770,6 +771,70 @@ impl Ser for ast::Stmt {
                 ser.write_int(0); // Empty keywords dict
 
                 ser.write_location(c.range());
+            }
+            ast::Stmt::Try(t) => {
+                ser.write_tag(TAG_TRY_STMT);
+
+                // Serialize try body
+                ser.serialize_block(&t.body);
+
+                // Serialize number of except handlers
+                ser.write_tagged_int(t.handlers.len() as i64);
+
+                // Serialize exception types for each handler
+                for handler in &t.handlers {
+                    match handler {
+                        ast::ExceptHandler::ExceptHandler(h) => {
+                            if let Some(type_expr) = &h.type_ {
+                                ser.write_bool(true);
+                                type_expr.serialize(ser);
+                            } else {
+                                ser.write_bool(false);
+                            }
+                        }
+                    }
+                }
+
+                // Serialize variable names for each handler
+                for handler in &t.handlers {
+                    match handler {
+                        ast::ExceptHandler::ExceptHandler(h) => {
+                            if let Some(name) = &h.name {
+                                ser.write_bool(true);
+                                ser.write_bytes(name.as_bytes());
+                            } else {
+                                ser.write_bool(false);
+                            }
+                        }
+                    }
+                }
+
+                // Serialize handler bodies
+                for handler in &t.handlers {
+                    match handler {
+                        ast::ExceptHandler::ExceptHandler(h) => {
+                            ser.serialize_block(&h.body);
+                        }
+                    }
+                }
+
+                // Serialize else body (optional)
+                if !t.orelse.is_empty() {
+                    ser.write_bool(true);
+                    ser.serialize_block(&t.orelse);
+                } else {
+                    ser.write_bool(false);
+                }
+
+                // Serialize finally body (optional)
+                if !t.finalbody.is_empty() {
+                    ser.write_bool(true);
+                    ser.serialize_block(&t.finalbody);
+                } else {
+                    ser.write_bool(false);
+                }
+
+                ser.write_location(t.range());
             }
             _ => {
                 panic!("unsupported: {self:?}");
