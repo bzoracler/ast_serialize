@@ -74,6 +74,7 @@ const TAG_IMPORT_FROM: u8 = 196;
 const TAG_ASSERT_STMT: u8 = 197;
 const TAG_FOR_STMT: u8 = 198;
 const TAG_WITH_STMT: u8 = 199;
+const TAG_OPERATOR_ASSIGNMENT_STMT: u8 = 200;
 const TAG_UNBOUND_TYPE: u8 = 104;
 const TAG_UNION_TYPE: u8 = 115;
 
@@ -568,6 +569,16 @@ impl Ser for ast::Stmt {
                 serialize_type(ser, &a.annotation);
                 // new_syntax = true (using PEP 526 syntax)
                 ser.write_bool(true);
+                ser.write_location(a.range());
+            }
+            ast::Stmt::AugAssign(a) => {
+                ser.write_tag(TAG_OPERATOR_ASSIGNMENT_STMT);
+                // Serialize operator as string
+                ser.write_bytes(a.op.as_str().as_bytes());
+                // Serialize lvalue (target)
+                a.target.serialize(ser);
+                // Serialize rvalue (value)
+                a.value.serialize(ser);
                 ser.write_location(a.range());
             }
             ast::Stmt::Import(i) => {
