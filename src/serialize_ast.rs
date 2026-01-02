@@ -1211,6 +1211,7 @@ fn serialize_fstring_elements(ser: &mut Serializer, elems: Vec<&ast::Interpolate
                 if let Some(format_spec) = &interp.format_spec {
                     ser.write_bool(true);
                     serialize_fstring_elements(ser, format_spec.elements.iter().collect());
+                    ser.write_location(format_spec.range());
                 } else {
                     ser.write_bool(false);
                 }
