@@ -78,6 +78,7 @@ const TAG_OPERATOR_ASSIGNMENT_STMT: u8 = 200;
 const TAG_TRY_STMT: u8 = 201;
 const TAG_ELLIPSIS_EXPR: u8 = 202;
 const TAG_CONDITIONAL_EXPR: u8 = 203;
+const TAG_DEL_STMT: u8 = 204;
 const TAG_UNBOUND_TYPE: u8 = 104;
 const TAG_UNION_TYPE: u8 = 115;
 const TAG_LIST_TYPE: u8 = 118;
@@ -852,6 +853,22 @@ impl Ser for ast::Stmt {
                 }
 
                 ser.write_location(t.range());
+            }
+            ast::Stmt::Delete(d) => {
+                ser.write_tag(TAG_DEL_STMT);
+                // Serialize the target expression
+                // If there's only one target, serialize it directly
+                // If there are multiple targets, serialize as a tuple
+                if d.targets.len() == 1 {
+                    d.targets[0].serialize(ser);
+                } else {
+                    // Serialize as a tuple expression
+                    ser.write_tag(TAG_TUPLE_EXPR);
+                    d.targets.serialize(ser);
+                    ser.write_location(d.range());
+                    ser.write_end_tag();
+                }
+                ser.write_location(d.range());
             }
             _ => {
                 panic!("unsupported: {self:?}");
