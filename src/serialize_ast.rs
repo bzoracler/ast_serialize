@@ -6,9 +6,17 @@ use anyhow::Result;
 use ruff_linter::source_kind::SourceKind;
 use ruff_python_ast::{PySourceType, Number};
 use ruff_python_ast::{self as ast};
-use ruff_python_parser::{ParseOptions, parse};
+use ruff_python_parser::{ParseOptions, parse_unchecked};
 use ruff_source_file::LineIndex;
 use ruff_text_size::{Ranged, TextRange};
+
+/// Syntax error information with location details
+#[derive(Debug, Clone)]
+pub struct SyntaxError {
+    pub line: usize,
+    pub column: usize,
+    pub message: String,
+}
 
 // Fixed tags for primitive types (must match mypy/cache.py)
 const TAG_LITERAL_FALSE: u8   = 0;
@@ -120,12 +128,14 @@ const LONG_INT_TRAILER: u8 = 15;
 ///
 /// # Returns
 ///
-/// A `Vec<u8>` containing the serialized AST in mypy's binary format
+/// A tuple containing:
+/// - A `Vec<u8>` with the serialized AST in mypy's binary format (may be partial if there are syntax errors)
+/// - A `Vec<SyntaxError>` containing any syntax errors with line/column information
 ///
 /// # Errors
 ///
-/// Returns an error if the file cannot be read or parsed
-pub fn serialize_python_file(file_path: &Path) -> Result<Vec<u8>> {
+/// Returns an error if the file cannot be read (but not for syntax errors, which are returned in the tuple)
+pub(crate) fn serialize_python_file(file_path: &Path) -> Result<(Vec<u8>, Vec<SyntaxError>)> {
     let source_type = PySourceType::from(file_path);
     let source_kind = SourceKind::from_path(file_path, source_type)?.ok_or_else(|| {
         anyhow::anyhow!(
@@ -133,13 +143,37 @@ pub fn serialize_python_file(file_path: &Path) -> Result<Vec<u8>> {
             file_path.display()
         )
     })?;
-    let python_ast =
-        parse(source_kind.source_code(), ParseOptions::from(source_type))?.into_syntax();
-    let line_index = LineIndex::from_source_text(source_kind.source_code());
-    let mut ser = Serializer { bytes: Vec::new(), imports: Vec::new(), import_froms: Vec::new(), line_index: line_index, text: source_kind.source_code() };
-    python_ast.serialize(&mut ser);
 
-    Ok(ser.bytes)
+    let line_index = LineIndex::from_source_text(source_kind.source_code());
+
+    // Parse the file - this always returns a result, even with syntax errors
+    let parsed = parse_unchecked(source_kind.source_code(), ParseOptions::from(source_type));
+
+    // Extract syntax errors with location information
+    let syntax_errors: Vec<SyntaxError> = parsed
+        .errors()
+        .iter()
+        .map(|error| {
+            let location = line_index.line_column(error.location.start(), source_kind.source_code());
+            SyntaxError {
+                line: location.line.get(),
+                column: location.column.get(),
+                message: error.error.to_string(),
+            }
+        })
+        .collect();
+
+    // Serialize the AST (even if partial due to syntax errors)
+    let mut ser = Serializer {
+        bytes: Vec::new(),
+        imports: Vec::new(),
+        import_froms: Vec::new(),
+        line_index,
+        text: source_kind.source_code()
+    };
+    parsed.syntax().serialize(&mut ser);
+
+    Ok((ser.bytes, syntax_errors))
 }
 
 // Used to report which imports are used in a file
