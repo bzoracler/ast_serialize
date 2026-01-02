@@ -1188,6 +1188,26 @@ fn serialize_fstring_elements(ser: &mut Serializer, elems: Vec<&ast::Interpolate
             ast::InterpolatedStringElement::Interpolation(interp) => {
                 ser.write_tag(TAG_FSTRING_INTERPOLATION);
                 interp.expression.serialize(ser);
+                match interp.conversion {
+                    ast::ConversionFlag::None => {
+                        ser.write_bool(false);
+                    }
+                    ast::ConversionFlag::Str => {
+                        // !s conversion: f"{name!s}"
+                        ser.write_bool(true);
+                        ser.write_bytes(b"!s");
+                    }
+                    ast::ConversionFlag::Repr => {
+                        // !r conversion: f"{name!r}"
+                        ser.write_bool(true);
+                        ser.write_bytes(b"!r");
+                    }
+                    ast::ConversionFlag::Ascii => {
+                        // !a conversion: f"{name!a}"
+                        ser.write_bool(true);
+                        ser.write_bytes(b"!a");
+                    }
+                }
                 if let Some(format_spec) = &interp.format_spec {
                     ser.write_bool(true);
                     serialize_fstring_elements(ser, format_spec.elements.iter().collect());
