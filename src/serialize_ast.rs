@@ -79,6 +79,8 @@ const TAG_TRY_STMT: u8 = 201;
 const TAG_ELLIPSIS_EXPR: u8 = 202;
 const TAG_CONDITIONAL_EXPR: u8 = 203;
 const TAG_DEL_STMT: u8 = 204;
+const TAG_FSTRING_EXPR: u8 = 205;
+const TAG_FSTRING_INTERPOLATION: u8 = 206;
 const TAG_UNBOUND_TYPE: u8 = 104;
 const TAG_UNION_TYPE: u8 = 115;
 const TAG_LIST_TYPE: u8 = 118;
@@ -1161,11 +1163,40 @@ impl Ser for ast::Expr {
                 s.step.serialize(ser);
                 ser.write_location(s.range());
             }
+            ast::Expr::FString(fs) => {
+                ser.write_tag(TAG_FSTRING_EXPR);
+                serialize_fstring_elements(ser, fs.value.elements().collect());
+                ser.write_location(fs.range());
+            }
             _ => {
                 panic!("unsupported: {self:?}");
             }
         };
         ser.write_end_tag()
+    }
+}
+
+fn serialize_fstring_elements(ser: &mut Serializer, elems: Vec<&ast::InterpolatedStringElement>) {
+    ser.write_tag(TAG_LIST_GEN);
+    ser.write_usize(elems.len());
+    for elem in elems {
+        match elem {
+            ast::InterpolatedStringElement::Literal(lit) => {
+                ser.write_bytes(lit.value.as_bytes());
+                ser.write_location(lit.range());
+            }
+            ast::InterpolatedStringElement::Interpolation(interp) => {
+                ser.write_tag(TAG_FSTRING_INTERPOLATION);
+                interp.expression.serialize(ser);
+                if let Some(format_spec) = &interp.format_spec {
+                    ser.write_bool(true);
+                    serialize_fstring_elements(ser, format_spec.elements.iter().collect());
+                } else {
+                    ser.write_bool(false);
+                }
+                ser.write_end_tag();
+            }
+        }
     }
 }
 
