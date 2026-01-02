@@ -84,6 +84,7 @@ const TAG_FSTRING_INTERPOLATION: u8 = 206;
 const TAG_LAMBDA_EXPR: u8 = 207;
 const TAG_NAMED_EXPR: u8 = 208;
 const TAG_STAR_EXPR: u8 = 209;
+const TAG_BYTES_EXPR: u8 = 210;
 const TAG_UNBOUND_TYPE: u8 = 104;
 const TAG_UNION_TYPE: u8 = 115;
 const TAG_LIST_TYPE: u8 = 118;
@@ -1226,6 +1227,32 @@ impl Ser for ast::Expr {
                 // Serialize the wrapped expression
                 starred.value.serialize(ser);
                 ser.write_location(starred.range());
+            }
+            ast::Expr::BytesLiteral(bytes_lit) => {
+                ser.write_tag(TAG_BYTES_EXPR);
+                // Convert bytes to string representation with escape sequences
+                let mut result = Vec::new();
+                for bytes_part in bytes_lit.value.iter() {
+                    for &byte in bytes_part.value.iter() {
+                        match byte {
+                            b'\r' => result.extend_from_slice(b"\\r"),
+                            b'\n' => result.extend_from_slice(b"\\n"),
+                            b'\t' => result.extend_from_slice(b"\\t"),
+                            b'\\' => result.extend_from_slice(b"\\\\"),
+                            b'\'' => result.extend_from_slice(b"\\'"),
+                            // Printable ASCII characters (space to ~)
+                            32..=126 => result.push(byte),
+                            // Everything else as hex escape
+                            _ => {
+                                result.extend_from_slice(b"\\x");
+                                result.push(b"0123456789abcdef"[(byte >> 4) as usize]);
+                                result.push(b"0123456789abcdef"[(byte & 0xf) as usize]);
+                            }
+                        }
+                    }
+                }
+                ser.write_bytes(&result);
+                ser.write_location(bytes_lit.range());
             }
             _ => {
                 panic!("unsupported: {self:?}");
