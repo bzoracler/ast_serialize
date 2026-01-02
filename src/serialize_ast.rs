@@ -83,6 +83,7 @@ const TAG_FSTRING_EXPR: u8 = 205;
 const TAG_FSTRING_INTERPOLATION: u8 = 206;
 const TAG_LAMBDA_EXPR: u8 = 207;
 const TAG_NAMED_EXPR: u8 = 208;
+const TAG_STAR_EXPR: u8 = 209;
 const TAG_UNBOUND_TYPE: u8 = 104;
 const TAG_UNION_TYPE: u8 = 115;
 const TAG_LIST_TYPE: u8 = 118;
@@ -1219,6 +1220,12 @@ impl Ser for ast::Expr {
                 // Serialize value expression
                 named.value.serialize(ser);
                 ser.write_location(named.range());
+            }
+            ast::Expr::Starred(starred) => {
+                ser.write_tag(TAG_STAR_EXPR);
+                // Serialize the wrapped expression
+                starred.value.serialize(ser);
+                ser.write_location(starred.range());
             }
             _ => {
                 panic!("unsupported: {self:?}");
