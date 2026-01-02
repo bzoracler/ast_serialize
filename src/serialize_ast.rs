@@ -87,6 +87,7 @@ const TAG_STAR_EXPR: u8 = 209;
 const TAG_BYTES_EXPR: u8 = 210;
 const TAG_GLOBAL_DECL: u8 = 211;
 const TAG_NONLOCAL_DECL: u8 = 212;
+const TAG_AWAIT_EXPR: u8 = 213;
 const TAG_UNBOUND_TYPE: u8 = 104;
 const TAG_UNION_TYPE: u8 = 115;
 const TAG_LIST_TYPE: u8 = 118;
@@ -1275,6 +1276,12 @@ impl Ser for ast::Expr {
                 }
                 ser.write_bytes(&result);
                 ser.write_location(bytes_lit.range());
+            }
+            ast::Expr::Await(await_expr) => {
+                ser.write_tag(TAG_AWAIT_EXPR);
+                // Serialize the awaited expression
+                await_expr.value.serialize(ser);
+                ser.write_location(await_expr.range());
             }
             _ => {
                 panic!("unsupported: {self:?}");
