@@ -572,20 +572,23 @@ impl Ser for ast::Stmt {
                     for dec in &f.decorator_list {
                         dec.expression.serialize(ser);
                     }
+                    // Serialize start location of the decorator. End is same as the func def.
+                    let start_loc = ser.line_index.line_column(
+                        f.decorator_list.first().unwrap().range().start(), ser.text);
+                    ser.write_tagged_int(start_loc.line.get() as i64);
+                    ser.write_tagged_int(start_loc.column.get() as i64);
                 }
 
                 ser.write_tag(TAG_FUNC_DEF);
 
                 // Function name
                 ser.write_bytes(f.name.as_bytes());
-
-                // Arguments
+                // Parameters
                 serialize_parameters(ser, &f.parameters);
 
                 // Body
                 ser.serialize_block(&f.body);
 
-                // is_async
                 ser.write_bool(f.is_async);
 
                 // TODO: type_params (skip for now)
@@ -599,7 +602,30 @@ impl Ser for ast::Stmt {
                     ser.write_bool(false); // No return annotation
                 }
 
-                ser.write_location(f.range());
+                // Write location
+                if !f.decorator_list.is_empty() {
+                    // Custom location: use function name's line with last decorator's column
+                    ser.write_tag(TAG_LOCATION);
+
+                    let last_decorator = f.decorator_list.last().unwrap();
+                    let decorator_loc = ser.line_index.line_column(last_decorator.range().start(), ser.text);
+                    let name_loc = ser.line_index.line_column(f.name.range.start(), ser.text);
+                    let end_loc = ser.line_index.line_column(f.range().end(), ser.text);
+
+                    // Start: name's line, decorator's column
+                    let st_line = name_loc.line.get() as i64;
+                    let st_column = decorator_loc.column.get() as i64;
+
+                    ser.write_int(st_line);
+                    ser.write_int(st_column);
+
+                    // End deltas (relative to start)
+                    ser.write_int((end_loc.line.get() as i64) - st_line);
+                    ser.write_int((end_loc.column.get() as i64) - st_column);
+                } else {
+                    // No decorators: use the full range (already starts at async/def)
+                    ser.write_location(f.range());
+                }
 
                 if !f.decorator_list.is_empty() {
                     // Extra end tag for the Decorator wrapper in mypy AST
