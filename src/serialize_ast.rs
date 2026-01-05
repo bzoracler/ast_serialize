@@ -104,6 +104,7 @@ const TAG_UNION_TYPE: u8 = 115;
 const TAG_LIST_TYPE: u8 = 118;
 const TAG_ELLIPSIS_TYPE: u8 = 119;
 const TAG_RAW_EXPRESSION_TYPE: u8 = 120;
+const TAG_UNPACK_TYPE: u8 = 105;
 
 // Argument kinds (must match mypy/nodes.py)
 const ARG_POS: i64 = 0;        // Positional argument
@@ -594,6 +595,10 @@ fn serialize_type(ser: &mut Serializer, t: &ast::Expr) {
         ast::Expr::EllipsisLiteral(_) => {
             ser.write_tag(TAG_ELLIPSIS_TYPE);
             // EllipsisType has no attributes
+        }
+        ast::Expr::Starred(e) => {
+            ser.write_tag(TAG_UNPACK_TYPE);
+            serialize_type(ser, &e.value);
         }
         _ => {
             panic!("unsupported type: {t:?}");
