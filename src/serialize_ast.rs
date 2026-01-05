@@ -902,24 +902,25 @@ impl Ser for ast::Stmt {
                 // TODO: Type parameters (skip for now)
                 ser.write_bool(false); // No type params
 
-                // Metaclass - extract from keywords
+                // Keywords (all keyword arguments including metaclass)
+                ser.write_tag(TAG_DICT_STR_GEN);
                 if let Some(args) = &c.arguments {
-                    let metaclass = args.keywords.iter()
-                        .find(|kw| kw.arg.as_ref().map(|a| a.as_str()) == Some("metaclass"));
+                    // Count keywords with argument names (exclude **kwargs which have no arg)
+                    let named_keywords: Vec<_> = args.keywords.iter()
+                        .filter(|kw| kw.arg.is_some())
+                        .collect();
+                    ser.write_int(named_keywords.len() as i64);
 
-                    if let Some(meta_kw) = metaclass {
-                        ser.write_bool(true);  // has_metaclass = true
-                        meta_kw.value.serialize(ser);  // Serialize the metaclass expression
-                    } else {
-                        ser.write_bool(false);  // has_metaclass = false
+                    // Serialize each keyword: name then value
+                    for kw in named_keywords {
+                        if let Some(arg_name) = &kw.arg {
+                            ser.write_bytes(arg_name.as_bytes());
+                            kw.value.serialize(ser);
+                        }
                     }
                 } else {
-                    ser.write_bool(false);  // No arguments, no metaclass
+                    ser.write_int(0); // No keywords
                 }
-
-                // TODO: Keywords (skip for now)
-                ser.write_tag(TAG_DICT_STR_GEN);
-                ser.write_int(0); // Empty keywords dict
 
                 ser.write_location(c.range());
             }
