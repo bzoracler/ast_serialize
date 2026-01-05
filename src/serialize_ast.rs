@@ -563,10 +563,29 @@ fn serialize_type(ser: &mut Serializer, t: &ast::Expr) {
             serialize_simple_unbound_type(ser, b"None");
         }
         ast::Expr::BooleanLiteral(b) => {
-            // Serialize as NameExpr with "True" or "False"
+            // Serialize as RawExpressionType with bool value
             ser.write_tag(TAG_RAW_EXPRESSION_TYPE);
             ser.write_bytes(b"builtins.bool");
             ser.write_bool(b.value);
+        }
+        ast::Expr::NumberLiteral(n) => {
+            // Serialize integer literals as RawExpressionType with int value
+            if let Number::Int(int_val) = &n.value {
+                ser.write_tag(TAG_RAW_EXPRESSION_TYPE);
+                ser.write_bytes(b"builtins.int");
+                match int_val.as_i64() {
+                    Some(i64_val) => {
+                        ser.write_tagged_int(i64_val);
+                    }
+                    None => {
+                        // For very large integers, we could serialize as string
+                        // but for now just panic as this is rare in type contexts
+                        panic!("Integer literal in type annotation too large for i64: {}", int_val);
+                    }
+                }
+            } else {
+                panic!("unsupported number literal in type: {:?}", n);
+            }
         }
         ast::Expr::BinOp(e) => {
             // Handle union types (x | y)
