@@ -519,6 +519,25 @@ fn get_qualified_type_name(v: &mut Vec<u8>, e: &ast::Expr) {
     }
 }
 
+/// Extract an integer literal value from a type expression, handling both
+/// positive literals (NumberLiteral) and negative literals (UnaryOp(USub, NumberLiteral))
+fn extract_int_literal_value(expr: &ast::Expr) -> Option<i64> {
+    match expr {
+        ast::Expr::NumberLiteral(n) => {
+            if let Number::Int(int_val) = &n.value {
+                int_val.as_i64()
+            } else {
+                None
+            }
+        }
+        ast::Expr::UnaryOp(e) if matches!(e.op, ast::UnaryOp::USub) => {
+            // Recursively extract value from operand and negate it
+            extract_int_literal_value(&e.operand).map(|v| -v)
+        }
+        _ => None,
+    }
+}
+
 fn serialize_type(ser: &mut Serializer, t: &ast::Expr) {
     match t {
         ast::Expr::Name(e) => {
@@ -570,18 +589,13 @@ fn serialize_type(ser: &mut Serializer, t: &ast::Expr) {
         }
         ast::Expr::NumberLiteral(n) => {
             // Serialize integer literals as RawExpressionType with int value
-            if let Number::Int(int_val) = &n.value {
-                ser.write_tag(TAG_RAW_EXPRESSION_TYPE);
-                ser.write_bytes(b"builtins.int");
-                match int_val.as_i64() {
-                    Some(i64_val) => {
-                        ser.write_tagged_int(i64_val);
-                    }
-                    None => {
-                        // For very large integers, we could serialize as string
-                        // but for now just panic as this is rare in type contexts
-                        panic!("Integer literal in type annotation too large for i64: {}", int_val);
-                    }
+            if n.value.is_int() {
+                if let Some(int_val) = extract_int_literal_value(t) {
+                    ser.write_tag(TAG_RAW_EXPRESSION_TYPE);
+                    ser.write_bytes(b"builtins.int");
+                    ser.write_tagged_int(int_val);
+                } else {
+                    panic!("Integer literal in type annotation too large for i64: {:?}", n.value);
                 }
             } else {
                 panic!("unsupported number literal in type: {:?}", n);
@@ -618,6 +632,21 @@ fn serialize_type(ser: &mut Serializer, t: &ast::Expr) {
         ast::Expr::Starred(e) => {
             ser.write_tag(TAG_UNPACK_TYPE);
             serialize_type(ser, &e.value);
+        }
+        ast::Expr::UnaryOp(e) => {
+            // Handle negative integer literals in types (e.g., Literal[-1])
+            if matches!(e.op, ast::UnaryOp::USub) {
+                if let Some(int_val) = extract_int_literal_value(t) {
+                    ser.write_tag(TAG_RAW_EXPRESSION_TYPE);
+                    ser.write_bytes(b"builtins.int");
+                    ser.write_tagged_int(int_val);
+                    // Return early since we've already written location and end tag below
+                    ser.write_location(e.range());
+                    ser.write_end_tag();
+                    return;
+                }
+            }
+            panic!("unsupported unary operator in type: {:?}", e);
         }
         _ => {
             panic!("unsupported type: {t:?}");
