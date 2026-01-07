@@ -964,9 +964,12 @@ impl Ser for ast::Stmt {
                     ser.write_int(0); // No base classes
                 }
 
-                // TODO: Decorators (skip for now)
+                // Decorators
                 ser.write_tag(TAG_LIST_GEN);
-                ser.write_int(0); // Empty decorator list
+                ser.write_int(c.decorator_list.len() as i64);
+                for dec in &c.decorator_list {
+                    dec.expression.serialize(ser);
+                }
 
                 // TODO: Type parameters (skip for now)
                 ser.write_bool(false); // No type params
@@ -991,7 +994,30 @@ impl Ser for ast::Stmt {
                     ser.write_int(0); // No keywords
                 }
 
-                ser.write_location(c.range());
+                // Write location
+                if !c.decorator_list.is_empty() {
+                    // Custom location: use class name's line with last decorator's column
+                    ser.write_tag(TAG_LOCATION);
+
+                    let last_decorator = c.decorator_list.last().unwrap();
+                    let decorator_loc = ser.line_index.line_column(last_decorator.range().start(), ser.text);
+                    let name_loc = ser.line_index.line_column(c.name.range.start(), ser.text);
+                    let end_loc = ser.line_index.line_column(c.range().end(), ser.text);
+
+                    // Start: name's line, decorator's column
+                    let st_line = name_loc.line.get() as i64;
+                    let st_column = decorator_loc.column.get() as i64;
+
+                    ser.write_int(st_line);
+                    ser.write_int(st_column);
+
+                    // End deltas (relative to start)
+                    ser.write_int((end_loc.line.get() as i64) - st_line);
+                    ser.write_int((end_loc.column.get() as i64) - st_column);
+                } else {
+                    // No decorators: use the full range
+                    ser.write_location(c.range());
+                }
             }
             ast::Stmt::Try(t) => {
                 ser.write_tag(TAG_TRY_STMT);
