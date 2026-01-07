@@ -99,6 +99,7 @@ const TAG_GLOBAL_DECL: u8 = 211;
 const TAG_NONLOCAL_DECL: u8 = 212;
 const TAG_AWAIT_EXPR: u8 = 213;
 const TAG_BIG_INT_EXPR: u8 = 214;
+const TAG_IMPORT_ALL: u8 = 215;
 const TAG_UNBOUND_TYPE: u8 = 104;
 const TAG_UNION_TYPE: u8 = 115;
 const TAG_LIST_TYPE: u8 = 118;
@@ -797,45 +798,60 @@ impl Ser for ast::Stmt {
                 ser.write_location(i.range());
             }
             ast::Stmt::ImportFrom(ifrom) => {
-                ser.write_tag(TAG_IMPORT_FROM);
+                // Check if this is a wildcard import (from m import *)
+                if ifrom.names.len() == 1 && ifrom.names[0].name.as_str() == "*" {
+                    // Serialize as ImportAll
+                    ser.write_tag(TAG_IMPORT_ALL);
 
-                // Write relative import level (number of dots)
-                ser.write_tagged_int(ifrom.level as i64);
+                    // Write module name (empty string for "from . import *")
+                    ser.write_bytes(ifrom.module.as_ref().map_or(b"", |m| m.as_bytes()));
 
-                // Write module name (empty string for "from . import x")
-                ser.write_bytes(ifrom.module.as_ref().map_or(b"", |m| m.as_bytes()));
+                    // Write relative import level (number of dots)
+                    ser.write_tagged_int(ifrom.level as i64);
 
-                // Write number of imported names
-                ser.write_tagged_int(ifrom.names.len() as i64);
+                    ser.write_location(ifrom.range());
+                } else {
+                    // Regular from...import statement
+                    ser.write_tag(TAG_IMPORT_FROM);
 
-                // Collect names for dependency tracking
-                let mut names = Vec::new();
+                    // Write relative import level (number of dots)
+                    ser.write_tagged_int(ifrom.level as i64);
 
-                // Write each name and optional alias
-                for alias in &ifrom.names {
-                    ser.write_bytes(alias.name.as_bytes());
-                    if let Some(asname) = &alias.asname {
-                        ser.write_bool(true);
-                        ser.write_bytes(asname.as_bytes());
-                    } else {
-                        ser.write_bool(false);
+                    // Write module name (empty string for "from . import x")
+                    ser.write_bytes(ifrom.module.as_ref().map_or(b"", |m| m.as_bytes()));
+
+                    // Write number of imported names
+                    ser.write_tagged_int(ifrom.names.len() as i64);
+
+                    // Collect names for dependency tracking
+                    let mut names = Vec::new();
+
+                    // Write each name and optional alias
+                    for alias in &ifrom.names {
+                        ser.write_bytes(alias.name.as_bytes());
+                        if let Some(asname) = &alias.asname {
+                            ser.write_bool(true);
+                            ser.write_bytes(asname.as_bytes());
+                        } else {
+                            ser.write_bool(false);
+                        }
+
+                        // Collect for dependency tracking
+                        names.push((
+                            alias.name.to_string(),
+                            alias.asname.as_ref().map(|n| n.to_string())
+                        ));
                     }
 
-                    // Collect for dependency tracking
-                    names.push((
-                        alias.name.to_string(),
-                        alias.asname.as_ref().map(|n| n.to_string())
-                    ));
+                    // Track in import_froms list for dependency tracking
+                    ser.import_froms.push(ImportFrom {
+                        module: ifrom.module.as_ref().map_or(String::new(), |m| m.to_string()),
+                        relative: ifrom.level as i32,
+                        names,
+                    });
+
+                    ser.write_location(ifrom.range());
                 }
-
-                // Track in import_froms list for dependency tracking
-                ser.import_froms.push(ImportFrom {
-                    module: ifrom.module.as_ref().map_or(String::new(), |m| m.to_string()),
-                    relative: ifrom.level as i32,
-                    names,
-                });
-
-                ser.write_location(ifrom.range());
             }
             ast::Stmt::Return(s) => {
                 ser.write_tag(TAG_RETURN);
