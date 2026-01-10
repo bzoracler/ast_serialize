@@ -493,306 +493,6 @@ fn serialize_argument(
     ser.write_location(param.range());
 }
 
-fn serialize_simple_unbound_type(ser: &mut Serializer, name: &[u8]) {
-    ser.write_tag(TAG_UNBOUND_TYPE);
-    ser.write_bytes(name);
-    ser.write_tag(TAG_LIST_GEN);
-    ser.write_int(0);
-    // Write None for original_str_expr (optional field)
-    ser.write_tag(TAG_LITERAL_NONE);
-    // Write None for original_str_fallback (optional field)
-    ser.write_tag(TAG_LITERAL_NONE);
-}
-
-/// Serialize an Attribute type (e.g., foo.bar.Baz) with optional original_str_expr.
-fn serialize_attribute_type(
-    ser: &mut Serializer,
-    expr: &ast::Expr,
-    original_str_expr: Option<&str>,
-    original_str_fallback: Option<&str>,
-) {
-    ser.write_tag(TAG_UNBOUND_TYPE);
-    let mut v = Vec::new();
-    get_qualified_type_name(&mut v, expr);
-    ser.write_bytes(&v);
-    ser.write_tag(TAG_LIST_GEN);
-    ser.write_int(0);
-    // Write optional original_str_expr
-    if let Some(s) = original_str_expr {
-        ser.write_bytes(s.as_bytes());
-    } else {
-        ser.write_tag(TAG_LITERAL_NONE);
-    }
-    // Write optional original_str_fallback
-    if let Some(s) = original_str_fallback {
-        ser.write_bytes(s.as_bytes());
-    } else {
-        ser.write_tag(TAG_LITERAL_NONE);
-    }
-}
-
-/// Serialize a Subscript type (e.g., List[int], Dict[str, int]) with optional original_str_expr.
-fn serialize_subscript_type(
-    ser: &mut Serializer,
-    subscript: &ast::ExprSubscript,
-    original_str_expr: Option<&str>,
-    original_str_fallback: Option<&str>,
-) {
-    ser.write_tag(TAG_UNBOUND_TYPE);
-    let mut v = Vec::new();
-    get_qualified_type_name(&mut v, &subscript.value);
-    ser.write_bytes(&v);
-    ser.write_tag(TAG_LIST_GEN);
-    match subscript.slice.as_ref() {
-        ast::Expr::Tuple(t) => {
-            ser.write_usize(t.len());
-            for item in &t.elts {
-                serialize_type(ser, item);
-            }
-        }
-        _ => {
-            ser.write_int(1);
-            serialize_type(ser, &subscript.slice);
-        }
-    }
-    // Write optional original_str_expr
-    if let Some(s) = original_str_expr {
-        ser.write_bytes(s.as_bytes());
-    } else {
-        ser.write_tag(TAG_LITERAL_NONE);
-    }
-    // Write optional original_str_fallback
-    if let Some(s) = original_str_fallback {
-        ser.write_bytes(s.as_bytes());
-    } else {
-        ser.write_tag(TAG_LITERAL_NONE);
-    }
-}
-
-fn get_qualified_type_name(v: &mut Vec<u8>, e: &ast::Expr) {
-    match e {
-        ast::Expr::Name(e) => {
-            v.extend_from_slice(e.id.as_bytes());
-        }
-        ast::Expr::Attribute(e) => {
-            get_qualified_type_name(v, &e.value);
-            v.extend_from_slice(b".");
-            v.extend_from_slice(e.attr.as_bytes());
-        }
-        _ => {
-            panic!("unimplemented")
-        }
-    }
-}
-
-/// Extract an integer literal value from a type expression, handling both
-/// positive literals (NumberLiteral) and negative literals (UnaryOp(USub, NumberLiteral))
-fn extract_int_literal_value(expr: &ast::Expr) -> Option<i64> {
-    match expr {
-        ast::Expr::NumberLiteral(n) => {
-            if let Number::Int(int_val) = &n.value {
-                int_val.as_i64()
-            } else {
-                None
-            }
-        }
-        ast::Expr::UnaryOp(e) if matches!(e.op, ast::UnaryOp::USub) => {
-            // Recursively extract value from operand and negate it
-            extract_int_literal_value(&e.operand).map(|v| -v)
-        }
-        _ => None,
-    }
-}
-
-/// Parse and serialize a string literal that appears in a type context.
-/// This handles forward references like `x: "int"` and string literals in Literal types.
-fn serialize_string_type(ser: &mut Serializer, string_value: &str, range: TextRange) {
-    // Try to parse the string as a type expression, similar to fastparse.py's parse_type_string
-    // We wrap it in parentheses to parse it as an expression
-    let wrapped = format!("({})", string_value);
-    let parse_result = parse_unchecked(&wrapped, ParseOptions::from(Mode::Expression));
-
-    // Check if parsing succeeded and we got a valid type expression
-    if parse_result.errors().is_empty() {
-        // Extract the expression from the parsed module
-        if let ast::Mod::Expression(expr_mod) = parse_result.into_syntax() {
-            let expr = expr_mod.body;
-
-            // Check if this is a type expression that should have original_str_expr set
-            // (UnboundType or UnionType in mypy terms, which are Name/Attribute/Subscript or BinOp with | in AST)
-            match expr.as_ref() {
-                ast::Expr::Name(e) => {
-                    ser.write_tag(TAG_UNBOUND_TYPE);
-                    ser.write_bytes(e.id.as_bytes());
-                    ser.write_tag(TAG_LIST_GEN);
-                    ser.write_int(0);
-                    // Write original_str_expr
-                    ser.write_bytes(string_value.as_bytes());
-                    // Write original_str_fallback
-                    ser.write_bytes(b"builtins.str");
-                    ser.write_location(range);
-                    ser.write_end_tag();
-                    return;
-                }
-                ast::Expr::Attribute(_e) => {
-                    serialize_attribute_type(ser, expr.as_ref(), Some(string_value), Some("builtins.str"));
-                    ser.write_location(range);
-                    ser.write_end_tag();
-                    return;
-                }
-                ast::Expr::Subscript(e) => {
-                    serialize_subscript_type(ser, e, Some(string_value), Some("builtins.str"));
-                    ser.write_location(range);
-                    ser.write_end_tag();
-                    return;
-                }
-                ast::Expr::BinOp(binop) if matches!(binop.op, ast::Operator::BitOr) => {
-                    // Serialize as UnionType with original_str_expr and original_str_fallback
-                    serialize_union_type(ser, binop, range, Some(string_value), Some("builtins.str"));
-                    return;
-                }
-                _ => {
-                    // Other expressions - serialize as RawExpressionType
-                }
-            }
-        }
-    }
-
-    // If parsing failed or resulted in non-type expression, serialize as RawExpressionType
-    ser.write_tag(TAG_RAW_EXPRESSION_TYPE);
-    ser.write_bytes(b"builtins.str");
-    ser.write_bytes(string_value.as_bytes());
-    ser.write_location(range);
-    ser.write_end_tag();
-}
-
-/// Serialize a union type (BinOp with |) with optional original_str_expr and original_str_fallback.
-fn serialize_union_type(
-    ser: &mut Serializer,
-    binop: &ast::ExprBinOp,
-    range: TextRange,
-    original_str_expr: Option<&str>,
-    original_str_fallback: Option<&str>,
-) {
-    ser.write_tag(TAG_UNION_TYPE);
-    // Serialize items list with exactly two items (left and right)
-    ser.write_tag(TAG_LIST_GEN);
-    ser.write_int(2);
-    serialize_type(ser, &binop.left);
-    serialize_type(ser, &binop.right);
-    // uses_pep604_syntax = true (using | operator)
-    ser.write_bool(true);
-    // Write optional original_str_expr
-    if let Some(s) = original_str_expr {
-        ser.write_bytes(s.as_bytes());
-    } else {
-        ser.write_tag(TAG_LITERAL_NONE);
-    }
-    // Write optional original_str_fallback
-    if let Some(s) = original_str_fallback {
-        ser.write_bytes(s.as_bytes());
-    } else {
-        ser.write_tag(TAG_LITERAL_NONE);
-    }
-    ser.write_location(range);
-    ser.write_end_tag();
-}
-
-fn serialize_type(ser: &mut Serializer, t: &ast::Expr) {
-    match t {
-        ast::Expr::Name(e) => {
-            serialize_simple_unbound_type(ser, e.id.as_bytes());
-        }
-        ast::Expr::Attribute(_e) => {
-            serialize_attribute_type(ser, t, None, None);
-        }
-        ast::Expr::Subscript(e) => {
-            serialize_subscript_type(ser, e, None, None);
-        }
-        ast::Expr::NoneLiteral(_) => {
-            serialize_simple_unbound_type(ser, b"None");
-        }
-        ast::Expr::BooleanLiteral(b) => {
-            // Serialize as RawExpressionType with bool value
-            ser.write_tag(TAG_RAW_EXPRESSION_TYPE);
-            ser.write_bytes(b"builtins.bool");
-            ser.write_bool(b.value);
-        }
-        ast::Expr::NumberLiteral(n) => {
-            // Serialize integer literals as RawExpressionType with int value
-            if n.value.is_int() {
-                if let Some(int_val) = extract_int_literal_value(t) {
-                    ser.write_tag(TAG_RAW_EXPRESSION_TYPE);
-                    ser.write_bytes(b"builtins.int");
-                    ser.write_tagged_int(int_val);
-                } else {
-                    panic!("Integer literal in type annotation too large for i64: {:?}", n.value);
-                }
-            } else {
-                panic!("unsupported number literal in type: {:?}", n);
-            }
-        }
-        ast::Expr::BinOp(e) => {
-            // Handle union types (x | y)
-            if matches!(e.op, ast::Operator::BitOr) {
-                serialize_union_type(ser, e, t.range(), None, None);
-                return;
-            } else {
-                panic!("unsupported binary operator in type: {:?}", e.op);
-            }
-        }
-        ast::Expr::List(e) => {
-            ser.write_tag(TAG_LIST_TYPE);
-            // Serialize items list
-            ser.write_tag(TAG_LIST_GEN);
-            ser.write_int(e.elts.len() as i64);
-            for item in &e.elts {
-                serialize_type(ser, item);
-            }
-        }
-        ast::Expr::EllipsisLiteral(_) => {
-            ser.write_tag(TAG_ELLIPSIS_TYPE);
-            // EllipsisType has no attributes
-        }
-        ast::Expr::Starred(e) => {
-            ser.write_tag(TAG_UNPACK_TYPE);
-            serialize_type(ser, &e.value);
-        }
-        ast::Expr::UnaryOp(e) => {
-            // Handle negative integer literals in types (e.g., Literal[-1])
-            if matches!(e.op, ast::UnaryOp::USub) {
-                if let Some(int_val) = extract_int_literal_value(t) {
-                    ser.write_tag(TAG_RAW_EXPRESSION_TYPE);
-                    ser.write_bytes(b"builtins.int");
-                    ser.write_tagged_int(int_val);
-                    // Return early since we've already written location and end tag below
-                    ser.write_location(e.range());
-                    ser.write_end_tag();
-                    return;
-                }
-            }
-            panic!("unsupported unary operator in type: {:?}", e);
-        }
-        ast::Expr::StringLiteral(s) => {
-            // String literals in type context (forward references or Literal["x"])
-            // Extract the string value (concatenate all parts)
-            let mut string_value = String::new();
-            for part in &s.value {
-                string_value.push_str(part.as_str());
-            }
-
-            // Try to parse the string as a type expression
-            serialize_string_type(ser, &string_value, s.range());
-            return;  // serialize_string_type handles location and end tag
-        }
-        _ => {
-            panic!("unsupported type: {t:?}");
-        }
-    }
-    ser.write_location(t.range());
-    ser.write_end_tag();
-}
-
 impl Ser for ast::Stmt {
     fn serialize(&self, ser: &mut Serializer) {
         match self {
@@ -1691,6 +1391,315 @@ fn serialize_fstring_elements(ser: &mut Serializer, elems: Vec<&ast::Interpolate
                 ser.write_end_tag();
             }
         }
+    }
+}
+
+// ============================================================================
+// Type Serialization Functions
+// ============================================================================
+
+/// Main entry point for serializing type annotations.
+/// Handles all Python type expressions including names, attributes, subscripts,
+/// unions, literals, and forward references (string literals).
+fn serialize_type(ser: &mut Serializer, t: &ast::Expr) {
+    match t {
+        ast::Expr::Name(e) => {
+            serialize_simple_unbound_type(ser, e.id.as_bytes());
+        }
+        ast::Expr::Attribute(_e) => {
+            serialize_attribute_type(ser, t, None, None);
+        }
+        ast::Expr::Subscript(e) => {
+            serialize_subscript_type(ser, e, None, None);
+        }
+        ast::Expr::NoneLiteral(_) => {
+            serialize_simple_unbound_type(ser, b"None");
+        }
+        ast::Expr::BooleanLiteral(b) => {
+            // Serialize as RawExpressionType with bool value
+            ser.write_tag(TAG_RAW_EXPRESSION_TYPE);
+            ser.write_bytes(b"builtins.bool");
+            ser.write_bool(b.value);
+        }
+        ast::Expr::NumberLiteral(n) => {
+            // Serialize integer literals as RawExpressionType with int value
+            if n.value.is_int() {
+                if let Some(int_val) = extract_int_literal_value(t) {
+                    ser.write_tag(TAG_RAW_EXPRESSION_TYPE);
+                    ser.write_bytes(b"builtins.int");
+                    ser.write_tagged_int(int_val);
+                } else {
+                    panic!("Integer literal in type annotation too large for i64: {:?}", n.value);
+                }
+            } else {
+                panic!("unsupported number literal in type: {:?}", n);
+            }
+        }
+        ast::Expr::BinOp(e) => {
+            // Handle union types (x | y)
+            if matches!(e.op, ast::Operator::BitOr) {
+                serialize_union_type(ser, e, t.range(), None, None);
+                return;
+            } else {
+                panic!("unsupported binary operator in type: {:?}", e.op);
+            }
+        }
+        ast::Expr::List(e) => {
+            ser.write_tag(TAG_LIST_TYPE);
+            // Serialize items list
+            ser.write_tag(TAG_LIST_GEN);
+            ser.write_int(e.elts.len() as i64);
+            for item in &e.elts {
+                serialize_type(ser, item);
+            }
+        }
+        ast::Expr::EllipsisLiteral(_) => {
+            ser.write_tag(TAG_ELLIPSIS_TYPE);
+            // EllipsisType has no attributes
+        }
+        ast::Expr::Starred(e) => {
+            ser.write_tag(TAG_UNPACK_TYPE);
+            serialize_type(ser, &e.value);
+        }
+        ast::Expr::UnaryOp(e) => {
+            // Handle negative integer literals in types (e.g., Literal[-1])
+            if matches!(e.op, ast::UnaryOp::USub) {
+                if let Some(int_val) = extract_int_literal_value(t) {
+                    ser.write_tag(TAG_RAW_EXPRESSION_TYPE);
+                    ser.write_bytes(b"builtins.int");
+                    ser.write_tagged_int(int_val);
+                    // Return early since we've already written location and end tag below
+                    ser.write_location(e.range());
+                    ser.write_end_tag();
+                    return;
+                }
+            }
+            panic!("unsupported unary operator in type: {:?}", e);
+        }
+        ast::Expr::StringLiteral(s) => {
+            // String literals in type context (forward references or Literal["x"])
+            // Extract the string value (concatenate all parts)
+            let mut string_value = String::new();
+            for part in &s.value {
+                string_value.push_str(part.as_str());
+            }
+
+            // Try to parse the string as a type expression
+            serialize_string_type(ser, &string_value, s.range());
+            return;  // serialize_string_type handles location and end tag
+        }
+        _ => {
+            panic!("unsupported type: {t:?}");
+        }
+    }
+    ser.write_location(t.range());
+    ser.write_end_tag();
+}
+
+/// Parse and serialize a string literal that appears in a type context.
+/// This handles forward references like `x: "int"` and string literals in Literal types.
+fn serialize_string_type(ser: &mut Serializer, string_value: &str, range: TextRange) {
+    // Try to parse the string as a type expression, similar to fastparse.py's parse_type_string
+    // We wrap it in parentheses to parse it as an expression
+    let wrapped = format!("({})", string_value);
+    let parse_result = parse_unchecked(&wrapped, ParseOptions::from(Mode::Expression));
+
+    // Check if parsing succeeded and we got a valid type expression
+    if parse_result.errors().is_empty() {
+        // Extract the expression from the parsed module
+        if let ast::Mod::Expression(expr_mod) = parse_result.into_syntax() {
+            let expr = expr_mod.body;
+
+            // Check if this is a type expression that should have original_str_expr set
+            // (UnboundType or UnionType in mypy terms, which are Name/Attribute/Subscript or BinOp with | in AST)
+            match expr.as_ref() {
+                ast::Expr::Name(e) => {
+                    ser.write_tag(TAG_UNBOUND_TYPE);
+                    ser.write_bytes(e.id.as_bytes());
+                    ser.write_tag(TAG_LIST_GEN);
+                    ser.write_int(0);
+                    // Write original_str_expr
+                    ser.write_bytes(string_value.as_bytes());
+                    // Write original_str_fallback
+                    ser.write_bytes(b"builtins.str");
+                    ser.write_location(range);
+                    ser.write_end_tag();
+                    return;
+                }
+                ast::Expr::Attribute(_e) => {
+                    serialize_attribute_type(ser, expr.as_ref(), Some(string_value), Some("builtins.str"));
+                    ser.write_location(range);
+                    ser.write_end_tag();
+                    return;
+                }
+                ast::Expr::Subscript(e) => {
+                    serialize_subscript_type(ser, e, Some(string_value), Some("builtins.str"));
+                    ser.write_location(range);
+                    ser.write_end_tag();
+                    return;
+                }
+                ast::Expr::BinOp(binop) if matches!(binop.op, ast::Operator::BitOr) => {
+                    // Serialize as UnionType with original_str_expr and original_str_fallback
+                    serialize_union_type(ser, binop, range, Some(string_value), Some("builtins.str"));
+                    return;
+                }
+                _ => {
+                    // Other expressions - serialize as RawExpressionType
+                }
+            }
+        }
+    }
+
+    // If parsing failed or resulted in non-type expression, serialize as RawExpressionType
+    ser.write_tag(TAG_RAW_EXPRESSION_TYPE);
+    ser.write_bytes(b"builtins.str");
+    ser.write_bytes(string_value.as_bytes());
+    ser.write_location(range);
+    ser.write_end_tag();
+}
+
+/// Serialize a union type (BinOp with |) with optional original_str_expr and original_str_fallback.
+fn serialize_union_type(
+    ser: &mut Serializer,
+    binop: &ast::ExprBinOp,
+    range: TextRange,
+    original_str_expr: Option<&str>,
+    original_str_fallback: Option<&str>,
+) {
+    ser.write_tag(TAG_UNION_TYPE);
+    // Serialize items list with exactly two items (left and right)
+    ser.write_tag(TAG_LIST_GEN);
+    ser.write_int(2);
+    serialize_type(ser, &binop.left);
+    serialize_type(ser, &binop.right);
+    // uses_pep604_syntax = true (using | operator)
+    ser.write_bool(true);
+    // Write optional original_str_expr
+    if let Some(s) = original_str_expr {
+        ser.write_bytes(s.as_bytes());
+    } else {
+        ser.write_tag(TAG_LITERAL_NONE);
+    }
+    // Write optional original_str_fallback
+    if let Some(s) = original_str_fallback {
+        ser.write_bytes(s.as_bytes());
+    } else {
+        ser.write_tag(TAG_LITERAL_NONE);
+    }
+    ser.write_location(range);
+    ser.write_end_tag();
+}
+
+/// Serialize an Attribute type (e.g., foo.bar.Baz) with optional original_str_expr.
+fn serialize_attribute_type(
+    ser: &mut Serializer,
+    expr: &ast::Expr,
+    original_str_expr: Option<&str>,
+    original_str_fallback: Option<&str>,
+) {
+    ser.write_tag(TAG_UNBOUND_TYPE);
+    let mut v = Vec::new();
+    get_qualified_type_name(&mut v, expr);
+    ser.write_bytes(&v);
+    ser.write_tag(TAG_LIST_GEN);
+    ser.write_int(0);
+    // Write optional original_str_expr
+    if let Some(s) = original_str_expr {
+        ser.write_bytes(s.as_bytes());
+    } else {
+        ser.write_tag(TAG_LITERAL_NONE);
+    }
+    // Write optional original_str_fallback
+    if let Some(s) = original_str_fallback {
+        ser.write_bytes(s.as_bytes());
+    } else {
+        ser.write_tag(TAG_LITERAL_NONE);
+    }
+}
+
+/// Serialize a Subscript type (e.g., List[int], Dict[str, int]) with optional original_str_expr.
+fn serialize_subscript_type(
+    ser: &mut Serializer,
+    subscript: &ast::ExprSubscript,
+    original_str_expr: Option<&str>,
+    original_str_fallback: Option<&str>,
+) {
+    ser.write_tag(TAG_UNBOUND_TYPE);
+    let mut v = Vec::new();
+    get_qualified_type_name(&mut v, &subscript.value);
+    ser.write_bytes(&v);
+    ser.write_tag(TAG_LIST_GEN);
+    match subscript.slice.as_ref() {
+        ast::Expr::Tuple(t) => {
+            ser.write_usize(t.len());
+            for item in &t.elts {
+                serialize_type(ser, item);
+            }
+        }
+        _ => {
+            ser.write_int(1);
+            serialize_type(ser, &subscript.slice);
+        }
+    }
+    // Write optional original_str_expr
+    if let Some(s) = original_str_expr {
+        ser.write_bytes(s.as_bytes());
+    } else {
+        ser.write_tag(TAG_LITERAL_NONE);
+    }
+    // Write optional original_str_fallback
+    if let Some(s) = original_str_fallback {
+        ser.write_bytes(s.as_bytes());
+    } else {
+        ser.write_tag(TAG_LITERAL_NONE);
+    }
+}
+
+/// Serialize a simple unbound type (just a name like `int` or `None`).
+fn serialize_simple_unbound_type(ser: &mut Serializer, name: &[u8]) {
+    ser.write_tag(TAG_UNBOUND_TYPE);
+    ser.write_bytes(name);
+    ser.write_tag(TAG_LIST_GEN);
+    ser.write_int(0);
+    // Write None for original_str_expr (optional field)
+    ser.write_tag(TAG_LITERAL_NONE);
+    // Write None for original_str_fallback (optional field)
+    ser.write_tag(TAG_LITERAL_NONE);
+}
+
+/// Helper to build a qualified type name from nested attributes (e.g., `foo.bar.Baz`).
+fn get_qualified_type_name(v: &mut Vec<u8>, e: &ast::Expr) {
+    match e {
+        ast::Expr::Name(e) => {
+            v.extend_from_slice(e.id.as_bytes());
+        }
+        ast::Expr::Attribute(e) => {
+            get_qualified_type_name(v, &e.value);
+            v.extend_from_slice(b".");
+            v.extend_from_slice(e.attr.as_bytes());
+        }
+        _ => {
+            panic!("unimplemented")
+        }
+    }
+}
+
+/// Extract an integer literal value from a type expression, handling both
+/// positive literals (NumberLiteral) and negative literals (UnaryOp(USub, NumberLiteral)).
+fn extract_int_literal_value(expr: &ast::Expr) -> Option<i64> {
+    match expr {
+        ast::Expr::NumberLiteral(n) => {
+            if let Number::Int(int_val) = &n.value {
+                int_val.as_i64()
+            } else {
+                None
+            }
+        }
+        ast::Expr::UnaryOp(e) if matches!(e.op, ast::UnaryOp::USub) => {
+            // Recursively extract value from operand and negate it
+            extract_int_literal_value(&e.operand).map(|v| -v)
+        }
+        _ => None,
     }
 }
 
