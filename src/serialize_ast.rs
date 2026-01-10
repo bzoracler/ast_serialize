@@ -504,6 +504,44 @@ fn serialize_simple_unbound_type(ser: &mut Serializer, name: &[u8]) {
     ser.write_tag(TAG_LITERAL_NONE);
 }
 
+/// Serialize a Subscript type (e.g., List[int], Dict[str, int]) with optional original_str_expr.
+fn serialize_subscript_type(
+    ser: &mut Serializer,
+    subscript: &ast::ExprSubscript,
+    original_str_expr: Option<&str>,
+    original_str_fallback: Option<&str>,
+) {
+    ser.write_tag(TAG_UNBOUND_TYPE);
+    let mut v = Vec::new();
+    get_qualified_type_name(&mut v, &subscript.value);
+    ser.write_bytes(&v);
+    ser.write_tag(TAG_LIST_GEN);
+    match subscript.slice.as_ref() {
+        ast::Expr::Tuple(t) => {
+            ser.write_usize(t.len());
+            for item in &t.elts {
+                serialize_type(ser, item);
+            }
+        }
+        _ => {
+            ser.write_int(1);
+            serialize_type(ser, &subscript.slice);
+        }
+    }
+    // Write optional original_str_expr
+    if let Some(s) = original_str_expr {
+        ser.write_bytes(s.as_bytes());
+    } else {
+        ser.write_tag(TAG_LITERAL_NONE);
+    }
+    // Write optional original_str_fallback
+    if let Some(s) = original_str_fallback {
+        ser.write_bytes(s.as_bytes());
+    } else {
+        ser.write_tag(TAG_LITERAL_NONE);
+    }
+}
+
 fn get_qualified_type_name(v: &mut Vec<u8>, e: &ast::Expr) {
     match e {
         ast::Expr::Name(e) => {
@@ -585,27 +623,7 @@ fn serialize_string_type(ser: &mut Serializer, string_value: &str, range: TextRa
                     return;
                 }
                 ast::Expr::Subscript(e) => {
-                    ser.write_tag(TAG_UNBOUND_TYPE);
-                    let mut v = Vec::new();
-                    get_qualified_type_name(&mut v, &e.value);
-                    ser.write_bytes(&v);
-                    ser.write_tag(TAG_LIST_GEN);
-                    match e.slice.as_ref() {
-                        ast::Expr::Tuple(t) => {
-                            ser.write_usize(t.len());
-                            for item in &t.elts {
-                                serialize_type(ser, item);
-                            }
-                        }
-                        _ => {
-                            ser.write_int(1);
-                            serialize_type(ser, &e.slice);
-                        }
-                    }
-                    // Write original_str_expr
-                    ser.write_bytes(string_value.as_bytes());
-                    // Write original_str_fallback
-                    ser.write_bytes(b"builtins.str");
+                    serialize_subscript_type(ser, e, Some(string_value), Some("builtins.str"));
                     ser.write_location(range);
                     ser.write_end_tag();
                     return;
@@ -680,27 +698,7 @@ fn serialize_type(ser: &mut Serializer, t: &ast::Expr) {
             ser.write_tag(TAG_LITERAL_NONE);
         }
         ast::Expr::Subscript(e) => {
-            ser.write_tag(TAG_UNBOUND_TYPE);
-            let mut v = Vec::new();
-            get_qualified_type_name(&mut v, &e.value);
-            ser.write_bytes(&v);
-            ser.write_tag(TAG_LIST_GEN);
-            match e.slice.as_ref() {
-                ast::Expr::Tuple(t) => {
-                    ser.write_usize(t.len());
-                    for item in &t.elts {
-                        serialize_type(ser, item);
-                    }
-                }
-                _ => {
-                    ser.write_int(1);
-                    serialize_type(ser, &e.slice);
-                }
-            }
-            // Write None for original_str_expr (optional field)
-            ser.write_tag(TAG_LITERAL_NONE);
-            // Write None for original_str_fallback (optional field)
-            ser.write_tag(TAG_LITERAL_NONE);
+            serialize_subscript_type(ser, e, None, None);
         }
         ast::Expr::NoneLiteral(_) => {
             serialize_simple_unbound_type(ser, b"None");
