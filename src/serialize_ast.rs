@@ -6,7 +6,7 @@ use anyhow::Result;
 use ruff_linter::source_kind::SourceKind;
 use ruff_python_ast::{PySourceType, Number};
 use ruff_python_ast::{self as ast};
-use ruff_python_parser::{ParseOptions, parse_unchecked};
+use ruff_python_parser::{Mode, ParseOptions, parse_unchecked};
 use ruff_source_file::LineIndex;
 use ruff_text_size::{Ranged, TextRange};
 
@@ -539,12 +539,135 @@ fn extract_int_literal_value(expr: &ast::Expr) -> Option<i64> {
     }
 }
 
+/// Parse and serialize a string literal that appears in a type context.
+/// This handles forward references like `x: "int"` and string literals in Literal types.
+fn serialize_string_type(ser: &mut Serializer, string_value: &str, range: TextRange) {
+    // Try to parse the string as a type expression, similar to fastparse.py's parse_type_string
+    // We wrap it in parentheses to parse it as an expression
+    let wrapped = format!("({})", string_value);
+    let parse_result = parse_unchecked(&wrapped, ParseOptions::from(Mode::Expression));
+
+    // Check if parsing succeeded and we got a valid type expression
+    if parse_result.errors().is_empty() {
+        // Extract the expression from the parsed module
+        if let ast::Mod::Expression(expr_mod) = parse_result.into_syntax() {
+            let expr = expr_mod.body;
+
+            // Check if this is a type expression that should have original_str_expr set
+            // (UnboundType or UnionType in mypy terms, which are Name/Attribute/Subscript or BinOp with | in AST)
+            match expr.as_ref() {
+                ast::Expr::Name(e) => {
+                    ser.write_tag(TAG_UNBOUND_TYPE);
+                    ser.write_bytes(e.id.as_bytes());
+                    ser.write_tag(TAG_LIST_GEN);
+                    ser.write_int(0);
+                    // Write original_str_expr
+                    ser.write_bytes(string_value.as_bytes());
+                    // Write original_str_fallback
+                    ser.write_bytes(b"builtins.str");
+                    ser.write_location(range);
+                    ser.write_end_tag();
+                    return;
+                }
+                ast::Expr::Attribute(_e) => {
+                    ser.write_tag(TAG_UNBOUND_TYPE);
+                    let mut v = Vec::new();
+                    get_qualified_type_name(&mut v, expr.as_ref());
+                    ser.write_bytes(&v);
+                    ser.write_tag(TAG_LIST_GEN);
+                    ser.write_int(0);
+                    // Write original_str_expr
+                    ser.write_bytes(string_value.as_bytes());
+                    // Write original_str_fallback
+                    ser.write_bytes(b"builtins.str");
+                    ser.write_location(range);
+                    ser.write_end_tag();
+                    return;
+                }
+                ast::Expr::Subscript(e) => {
+                    ser.write_tag(TAG_UNBOUND_TYPE);
+                    let mut v = Vec::new();
+                    get_qualified_type_name(&mut v, &e.value);
+                    ser.write_bytes(&v);
+                    ser.write_tag(TAG_LIST_GEN);
+                    match e.slice.as_ref() {
+                        ast::Expr::Tuple(t) => {
+                            ser.write_usize(t.len());
+                            for item in &t.elts {
+                                serialize_type(ser, item);
+                            }
+                        }
+                        _ => {
+                            ser.write_int(1);
+                            serialize_type(ser, &e.slice);
+                        }
+                    }
+                    // Write original_str_expr
+                    ser.write_bytes(string_value.as_bytes());
+                    // Write original_str_fallback
+                    ser.write_bytes(b"builtins.str");
+                    ser.write_location(range);
+                    ser.write_end_tag();
+                    return;
+                }
+                ast::Expr::BinOp(binop) if matches!(binop.op, ast::Operator::BitOr) => {
+                    // Serialize as UnionType with original_str_expr and original_str_fallback
+                    serialize_union_type(ser, binop, range, Some(string_value), Some("builtins.str"));
+                    return;
+                }
+                _ => {
+                    // Other expressions - serialize as RawExpressionType
+                }
+            }
+        }
+    }
+
+    // If parsing failed or resulted in non-type expression, serialize as RawExpressionType
+    ser.write_tag(TAG_RAW_EXPRESSION_TYPE);
+    ser.write_bytes(b"builtins.str");
+    ser.write_bytes(string_value.as_bytes());
+    ser.write_location(range);
+    ser.write_end_tag();
+}
+
+/// Serialize a union type (BinOp with |) with optional original_str_expr and original_str_fallback.
+fn serialize_union_type(
+    ser: &mut Serializer,
+    binop: &ast::ExprBinOp,
+    range: TextRange,
+    original_str_expr: Option<&str>,
+    original_str_fallback: Option<&str>,
+) {
+    ser.write_tag(TAG_UNION_TYPE);
+    // Serialize items list with exactly two items (left and right)
+    ser.write_tag(TAG_LIST_GEN);
+    ser.write_int(2);
+    serialize_type(ser, &binop.left);
+    serialize_type(ser, &binop.right);
+    // uses_pep604_syntax = true (using | operator)
+    ser.write_bool(true);
+    // Write optional original_str_expr
+    if let Some(s) = original_str_expr {
+        ser.write_bytes(s.as_bytes());
+    } else {
+        ser.write_tag(TAG_LITERAL_NONE);
+    }
+    // Write optional original_str_fallback
+    if let Some(s) = original_str_fallback {
+        ser.write_bytes(s.as_bytes());
+    } else {
+        ser.write_tag(TAG_LITERAL_NONE);
+    }
+    ser.write_location(range);
+    ser.write_end_tag();
+}
+
 fn serialize_type(ser: &mut Serializer, t: &ast::Expr) {
     match t {
         ast::Expr::Name(e) => {
             serialize_simple_unbound_type(ser, e.id.as_bytes());
         }
-        ast::Expr::Attribute(e) => {
+        ast::Expr::Attribute(_e) => {
             ser.write_tag(TAG_UNBOUND_TYPE);
             let mut v = Vec::new();
             get_qualified_type_name(&mut v, &t);
@@ -605,14 +728,8 @@ fn serialize_type(ser: &mut Serializer, t: &ast::Expr) {
         ast::Expr::BinOp(e) => {
             // Handle union types (x | y)
             if matches!(e.op, ast::Operator::BitOr) {
-                ser.write_tag(TAG_UNION_TYPE);
-                // Serialize items list with exactly two items (left and right)
-                ser.write_tag(TAG_LIST_GEN);
-                ser.write_int(2);
-                serialize_type(ser, &e.left);
-                serialize_type(ser, &e.right);
-                // uses_pep604_syntax = true (using | operator)
-                ser.write_bool(true);
+                serialize_union_type(ser, e, t.range(), None, None);
+                return;
             } else {
                 panic!("unsupported binary operator in type: {:?}", e.op);
             }
@@ -648,6 +765,18 @@ fn serialize_type(ser: &mut Serializer, t: &ast::Expr) {
                 }
             }
             panic!("unsupported unary operator in type: {:?}", e);
+        }
+        ast::Expr::StringLiteral(s) => {
+            // String literals in type context (forward references or Literal["x"])
+            // Extract the string value (concatenate all parts)
+            let mut string_value = String::new();
+            for part in &s.value {
+                string_value.push_str(part.as_str());
+            }
+
+            // Try to parse the string as a type expression
+            serialize_string_type(ser, &string_value, s.range());
+            return;  // serialize_string_type handles location and end tag
         }
         _ => {
             panic!("unsupported type: {t:?}");
@@ -1633,7 +1762,7 @@ mod tests {
     fn print_hello() {
         let opt = ParseOptions::from(PySourceType::Python);
         let text = "print('hello')";
-        let ast = parse(text, opt).unwrap().into_syntax();
+        let ast = parse_unchecked(text, opt).into_syntax();
         let index = LineIndex::from_source_text(text);
         let mut ser = Serializer { bytes: Vec::new(), imports: Vec::new(), import_froms: Vec::new(), line_index: index, text: text };
         ast.serialize(&mut ser);
