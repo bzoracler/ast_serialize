@@ -4,7 +4,7 @@ use std::path::Path;
 
 mod serialize_ast;
 pub mod type_comment;
-mod attr_assign_visitor;
+mod func_effect_visitor;
 
 /// Parse a Python file and serialize its AST to mypy's binary format.
 ///

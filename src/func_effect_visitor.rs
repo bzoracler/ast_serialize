@@ -1,12 +1,14 @@
-//! Visitor to detect if a function body may define attributes on its first parameter.
+//! Visitor to detect if a function body has externally visible effects.
 //!
 //! This is used to determine if a function body can be safely omitted during serialization
-//! when errors are ignored in a file. If a method may define attributes (e.g., `self.x = 1`),
-//! the body must be preserved since attribute definitions have externally visible impact.
+//! when errors are ignored in a file. A function body must be preserved if it has effects
+//! that are externally visible, such as:
+//! - Defining attributes on its first parameter (e.g., `self.x = 1`)
+//! - Containing yield expressions that affect the return type
 
 use ruff_python_ast::{self as ast, visitor::Visitor};
 
-/// Check if a function body may define attributes on its first parameter or contains yield.
+/// Check if a function body has externally visible effects.
 ///
 /// Returns `true` if the function body contains:
 /// - Any assignments to attributes of the first parameter:
@@ -19,8 +21,7 @@ use ruff_python_ast::{self as ast, visitor::Visitor};
 /// - Yield expressions: `yield x` or `yield from iterable`
 ///   (these affect the inferred return type, making the function a generator)
 ///
-/// Returns `false` if the function has no parameters or if no attribute assignments
-/// or yield expressions are found.
+/// Returns `false` if no externally visible effects are found.
 ///
 /// # Examples
 ///
@@ -29,11 +30,14 @@ use ruff_python_ast::{self as ast, visitor::Visitor};
 /// def foo(self):
 ///     self.x = 1
 ///
+/// def bar():
+///     yield 1
+///
 /// # Returns false for:
-/// def foo(self):
+/// def baz(self):
 ///     local_var = 1
 /// ```
-pub fn may_define_attributes(body: &[ast::Stmt], parameters: &ast::Parameters) -> bool {
+pub fn has_externally_visible_effect(body: &[ast::Stmt], parameters: &ast::Parameters) -> bool {
     // Get the name of the first parameter (if any)
     let first_param_name = parameters
         .posonlyargs
@@ -42,7 +46,7 @@ pub fn may_define_attributes(body: &[ast::Stmt], parameters: &ast::Parameters) -
         .map(|p| p.parameter.name.as_str())
         .unwrap_or("");
 
-    let mut visitor = AttributeDefiner {
+    let mut visitor = EffectDetector {
         first_param_name,
         defines_attributes: false,
         contains_yield: false,
@@ -52,8 +56,8 @@ pub fn may_define_attributes(body: &[ast::Stmt], parameters: &ast::Parameters) -
     visitor.defines_attributes || visitor.contains_yield
 }
 
-/// Visitor that detects attribute assignments on a specific parameter and yield expressions.
-struct AttributeDefiner<'a> {
+/// Visitor that detects externally visible effects in function bodies.
+struct EffectDetector<'a> {
     /// Name of the first parameter to check (e.g., "self")
     first_param_name: &'a str,
     /// Whether we've found an attribute assignment
@@ -62,7 +66,7 @@ struct AttributeDefiner<'a> {
     contains_yield: bool,
 }
 
-impl<'a> Visitor<'a> for AttributeDefiner<'a> {
+impl<'a> Visitor<'a> for EffectDetector<'a> {
     fn visit_stmt(&mut self, stmt: &'a ast::Stmt) {
         // Early exit if we already found both an attribute definition and yield
         if self.defines_attributes && self.contains_yield {
@@ -131,7 +135,7 @@ impl<'a> Visitor<'a> for AttributeDefiner<'a> {
     }
 }
 
-impl<'a> AttributeDefiner<'a> {
+impl<'a> EffectDetector<'a> {
     /// Check if an expression contains an attribute access on the first parameter.
     ///
     /// This handles:
@@ -170,7 +174,7 @@ mod tests {
     use ruff_python_parser::{parse_unchecked, ParseOptions};
     use ruff_python_ast::PySourceType;
 
-    /// Helper to parse a function and check if it may define attributes
+    /// Helper to parse a function and check if it has externally visible effects
     fn check_function(code: &str) -> bool {
         let parsed = parse_unchecked(code, ParseOptions::from(PySourceType::Python));
         let ast::Mod::Module(module) = parsed.into_syntax() else {
@@ -180,7 +184,7 @@ mod tests {
         // Get the first function definition
         for stmt in &module.body {
             if let ast::Stmt::FunctionDef(func) = stmt {
-                return may_define_attributes(&func.body, &func.parameters);
+                return has_externally_visible_effect(&func.body, &func.parameters);
             }
         }
         panic!("No function found in code");
