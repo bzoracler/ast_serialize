@@ -6,18 +6,21 @@
 
 use ruff_python_ast::{self as ast, visitor::Visitor};
 
-/// Check if a function body may define attributes on its first parameter.
+/// Check if a function body may define attributes on its first parameter or contains yield.
 ///
-/// Returns `true` if the function body contains any assignments to attributes
-/// of the first parameter, including:
-/// - Direct assignments: `self.x = 1`
-/// - Augmented assignments: `self.x += 1`
-/// - Annotated assignments: `self.x: int = 1`
-/// - Tuple/list unpacking: `self.x, self.y = f()`
-/// - Starred expressions: `*self.x = range(10)`
-/// - Nested tuple/list unpacking: `(self.x, (self.y, self.z)) = f()`
+/// Returns `true` if the function body contains:
+/// - Any assignments to attributes of the first parameter:
+///   - Direct assignments: `self.x = 1`
+///   - Augmented assignments: `self.x += 1`
+///   - Annotated assignments: `self.x: int = 1`
+///   - Tuple/list unpacking: `self.x, self.y = f()`
+///   - Starred expressions: `*self.x = range(10)`
+///   - Nested tuple/list unpacking: `(self.x, (self.y, self.z)) = f()`
+/// - Yield expressions: `yield x` or `yield from iterable`
+///   (these affect the inferred return type, making the function a generator)
 ///
-/// Returns `false` if the function has no parameters or if no attribute assignments are found.
+/// Returns `false` if the function has no parameters or if no attribute assignments
+/// or yield expressions are found.
 ///
 /// # Examples
 ///
@@ -31,39 +34,38 @@ use ruff_python_ast::{self as ast, visitor::Visitor};
 ///     local_var = 1
 /// ```
 pub fn may_define_attributes(body: &[ast::Stmt], parameters: &ast::Parameters) -> bool {
-    // Get the name of the first parameter
+    // Get the name of the first parameter (if any)
     let first_param_name = parameters
         .posonlyargs
         .first()
         .or(parameters.args.first())
-        .map(|p| p.parameter.name.as_str());
-
-    let Some(first_param_name) = first_param_name else {
-        // No parameters, can't define attributes
-        return false;
-    };
+        .map(|p| p.parameter.name.as_str())
+        .unwrap_or("");
 
     let mut visitor = AttributeDefiner {
         first_param_name,
         defines_attributes: false,
+        contains_yield: false,
     };
 
     visitor.visit_body(body);
-    visitor.defines_attributes
+    visitor.defines_attributes || visitor.contains_yield
 }
 
-/// Visitor that detects attribute assignments on a specific parameter.
+/// Visitor that detects attribute assignments on a specific parameter and yield expressions.
 struct AttributeDefiner<'a> {
     /// Name of the first parameter to check (e.g., "self")
     first_param_name: &'a str,
     /// Whether we've found an attribute assignment
     defines_attributes: bool,
+    /// Whether we've found a yield expression
+    contains_yield: bool,
 }
 
 impl<'a> Visitor<'a> for AttributeDefiner<'a> {
     fn visit_stmt(&mut self, stmt: &'a ast::Stmt) {
-        // Early exit if we already found an attribute definition
-        if self.defines_attributes {
+        // Early exit if we already found both an attribute definition and yield
+        if self.defines_attributes && self.contains_yield {
             return;
         }
 
@@ -100,6 +102,32 @@ impl<'a> Visitor<'a> for AttributeDefiner<'a> {
 
         // Continue walking the AST
         ast::visitor::walk_stmt(self, stmt);
+    }
+
+    fn visit_expr(&mut self, expr: &'a ast::Expr) {
+        // Early exit if we already found both an attribute definition and yield
+        if self.defines_attributes && self.contains_yield {
+            return;
+        }
+
+        // Check for yield expressions
+        match expr {
+            ast::Expr::Yield(_) | ast::Expr::YieldFrom(_) => {
+                self.contains_yield = true;
+                // Don't need to walk further into yield expression
+                return;
+            }
+            // Don't recurse into nested functions/lambdas - they have their own scope
+            ast::Expr::Lambda(_) => {
+                // Skip lambda bodies - yield in a lambda would be a syntax error anyway,
+                // but we skip for consistency with nested function handling
+                return;
+            }
+            _ => {}
+        }
+
+        // Continue walking the AST
+        ast::visitor::walk_expr(self, expr);
     }
 }
 
@@ -465,6 +493,139 @@ def foo(self):
         let code = r#"
 def foo(self):
     (a, [self.x, b]) = (1, [2, 3])
+"#;
+        assert!(check_function(code));
+    }
+
+    // Yield expression tests
+
+    #[test]
+    fn test_simple_yield() {
+        let code = r#"
+def foo(self):
+    yield 1
+"#;
+        assert!(check_function(code));
+    }
+
+    #[test]
+    fn test_yield_from() {
+        let code = r#"
+def foo(self):
+    yield from range(10)
+"#;
+        assert!(check_function(code));
+    }
+
+    #[test]
+    fn test_yield_in_loop() {
+        let code = r#"
+def foo(self):
+    for i in range(10):
+        yield i
+"#;
+        assert!(check_function(code));
+    }
+
+    #[test]
+    fn test_yield_in_if() {
+        let code = r#"
+def foo(self):
+    if True:
+        yield 1
+"#;
+        assert!(check_function(code));
+    }
+
+    #[test]
+    fn test_yield_in_expression() {
+        let code = r#"
+def foo(self):
+    x = (yield 1)
+"#;
+        assert!(check_function(code));
+    }
+
+    #[test]
+    fn test_yield_with_no_value() {
+        let code = r#"
+def foo(self):
+    yield
+"#;
+        assert!(check_function(code));
+    }
+
+    #[test]
+    fn test_yield_in_comprehension() {
+        // Yield in generator expression
+        let code = r#"
+def foo(self):
+    return [(yield i) for i in range(10)]
+"#;
+        assert!(check_function(code));
+    }
+
+    #[test]
+    fn test_yield_with_attribute_assignment() {
+        // Both yield and attribute assignment
+        let code = r#"
+def foo(self):
+    self.x = 1
+    yield 2
+"#;
+        assert!(check_function(code));
+    }
+
+    #[test]
+    fn test_yield_in_nested_function_no_leak() {
+        // Yield in nested function should not count
+        let code = r#"
+def foo(self):
+    def inner():
+        yield 1
+    return inner
+"#;
+        assert!(!check_function(code));
+    }
+
+    #[test]
+    fn test_no_yield_no_attributes() {
+        let code = r#"
+def foo(self):
+    x = 1
+    return x
+"#;
+        assert!(!check_function(code));
+    }
+
+    #[test]
+    fn test_yield_in_try_except() {
+        let code = r#"
+def foo(self):
+    try:
+        yield 1
+    except:
+        pass
+"#;
+        assert!(check_function(code));
+    }
+
+    #[test]
+    fn test_yield_in_with() {
+        let code = r#"
+def foo(self):
+    with open("file") as f:
+        yield f.read()
+"#;
+        assert!(check_function(code));
+    }
+
+    #[test]
+    fn test_yield_no_params() {
+        // Function with no parameters but with yield should still preserve body
+        let code = r#"
+def foo():
+    yield 1
 "#;
         assert!(check_function(code));
     }
