@@ -1,0 +1,471 @@
+//! Visitor to detect if a function body may define attributes on its first parameter.
+//!
+//! This is used to determine if a function body can be safely omitted during serialization
+//! when errors are ignored in a file. If a method may define attributes (e.g., `self.x = 1`),
+//! the body must be preserved since attribute definitions have externally visible impact.
+
+use ruff_python_ast::{self as ast, visitor::Visitor};
+
+/// Check if a function body may define attributes on its first parameter.
+///
+/// Returns `true` if the function body contains any assignments to attributes
+/// of the first parameter, including:
+/// - Direct assignments: `self.x = 1`
+/// - Augmented assignments: `self.x += 1`
+/// - Annotated assignments: `self.x: int = 1`
+/// - Tuple/list unpacking: `self.x, self.y = f()`
+/// - Starred expressions: `*self.x = range(10)`
+/// - Nested tuple/list unpacking: `(self.x, (self.y, self.z)) = f()`
+///
+/// Returns `false` if the function has no parameters or if no attribute assignments are found.
+///
+/// # Examples
+///
+/// ```python
+/// # Returns true for:
+/// def foo(self):
+///     self.x = 1
+///
+/// # Returns false for:
+/// def foo(self):
+///     local_var = 1
+/// ```
+pub fn may_define_attributes(body: &[ast::Stmt], parameters: &ast::Parameters) -> bool {
+    // Get the name of the first parameter
+    let first_param_name = parameters
+        .posonlyargs
+        .first()
+        .or(parameters.args.first())
+        .map(|p| p.parameter.name.as_str());
+
+    let Some(first_param_name) = first_param_name else {
+        // No parameters, can't define attributes
+        return false;
+    };
+
+    let mut visitor = AttributeDefiner {
+        first_param_name,
+        defines_attributes: false,
+    };
+
+    visitor.visit_body(body);
+    visitor.defines_attributes
+}
+
+/// Visitor that detects attribute assignments on a specific parameter.
+struct AttributeDefiner<'a> {
+    /// Name of the first parameter to check (e.g., "self")
+    first_param_name: &'a str,
+    /// Whether we've found an attribute assignment
+    defines_attributes: bool,
+}
+
+impl<'a> Visitor<'a> for AttributeDefiner<'a> {
+    fn visit_stmt(&mut self, stmt: &'a ast::Stmt) {
+        // Early exit if we already found an attribute definition
+        if self.defines_attributes {
+            return;
+        }
+
+        match stmt {
+            // Don't recurse into nested functions/classes - they have their own scope
+            ast::Stmt::FunctionDef(_) | ast::Stmt::ClassDef(_) => {
+                // Simply skip nested definitions entirely
+                return;
+            }
+            // Check various assignment forms
+            ast::Stmt::Assign(assign) => {
+                // Check all targets (can have multiple in `a = b = 1`)
+                for target in &assign.targets {
+                    if self.contains_param_attribute(target) {
+                        self.defines_attributes = true;
+                        return;
+                    }
+                }
+            }
+            ast::Stmt::AugAssign(aug_assign) => {
+                if self.contains_param_attribute(&aug_assign.target) {
+                    self.defines_attributes = true;
+                    return;
+                }
+            }
+            ast::Stmt::AnnAssign(ann_assign) => {
+                if self.contains_param_attribute(&ann_assign.target) {
+                    self.defines_attributes = true;
+                    return;
+                }
+            }
+            _ => {}
+        }
+
+        // Continue walking the AST
+        ast::visitor::walk_stmt(self, stmt);
+    }
+}
+
+impl<'a> AttributeDefiner<'a> {
+    /// Check if an expression contains an attribute access on the first parameter.
+    ///
+    /// This handles:
+    /// - Direct attribute: `self.x`
+    /// - Tuple unpacking: `(self.x, y)`, `self.x, y`
+    /// - List unpacking: `[self.x, y]`
+    /// - Starred expressions: `*self.x`
+    /// - Nested structures: `(self.x, (self.y, z))`
+    fn contains_param_attribute(&self, expr: &ast::Expr) -> bool {
+        match expr {
+            ast::Expr::Attribute(attr) => {
+                // Check if this is `param_name.something`
+                matches!(&*attr.value, ast::Expr::Name(name)
+                    if name.id.as_str() == self.first_param_name)
+            }
+            ast::Expr::Tuple(tuple) => {
+                // Check all elements in tuple: `self.x, self.y = f()`
+                tuple.elts.iter().any(|elt| self.contains_param_attribute(elt))
+            }
+            ast::Expr::List(list) => {
+                // Check all elements in list: `[self.x, self.y] = f()`
+                list.elts.iter().any(|elt| self.contains_param_attribute(elt))
+            }
+            ast::Expr::Starred(starred) => {
+                // Check starred expression: `*self.x = range(10)`
+                self.contains_param_attribute(&starred.value)
+            }
+            _ => false,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ruff_python_parser::{parse_unchecked, ParseOptions};
+    use ruff_python_ast::PySourceType;
+
+    /// Helper to parse a function and check if it may define attributes
+    fn check_function(code: &str) -> bool {
+        let parsed = parse_unchecked(code, ParseOptions::from(PySourceType::Python));
+        let ast::Mod::Module(module) = parsed.into_syntax() else {
+            panic!("Expected module");
+        };
+
+        // Get the first function definition
+        for stmt in &module.body {
+            if let ast::Stmt::FunctionDef(func) = stmt {
+                return may_define_attributes(&func.body, &func.parameters);
+            }
+        }
+        panic!("No function found in code");
+    }
+
+    #[test]
+    fn test_simple_attribute_assignment() {
+        let code = r#"
+def foo(self):
+    self.x = 1
+"#;
+        assert!(check_function(code));
+    }
+
+    #[test]
+    fn test_no_attribute_assignment() {
+        let code = r#"
+def foo(self):
+    local_var = 1
+"#;
+        assert!(!check_function(code));
+    }
+
+    #[test]
+    fn test_no_parameters() {
+        let code = r#"
+def foo():
+    x = 1
+"#;
+        assert!(!check_function(code));
+    }
+
+    #[test]
+    fn test_augmented_assignment() {
+        let code = r#"
+def foo(self):
+    self.x += 1
+"#;
+        assert!(check_function(code));
+    }
+
+    #[test]
+    fn test_annotated_assignment() {
+        let code = r#"
+def foo(self):
+    self.x: int = 1
+"#;
+        assert!(check_function(code));
+    }
+
+    #[test]
+    fn test_tuple_unpacking() {
+        let code = r#"
+def foo(self):
+    self.x, y = (1, 2)
+"#;
+        assert!(check_function(code));
+    }
+
+    #[test]
+    fn test_tuple_unpacking_second_element() {
+        let code = r#"
+def foo(self):
+    x, self.y = (1, 2)
+"#;
+        assert!(check_function(code));
+    }
+
+    #[test]
+    fn test_tuple_unpacking_no_self() {
+        let code = r#"
+def foo(self):
+    x, y = (1, 2)
+"#;
+        assert!(!check_function(code));
+    }
+
+    #[test]
+    fn test_list_unpacking() {
+        let code = r#"
+def foo(self):
+    [self.x, y] = [1, 2]
+"#;
+        assert!(check_function(code));
+    }
+
+    #[test]
+    fn test_nested_tuple_unpacking() {
+        let code = r#"
+def foo(self):
+    (self.x, (y, z)) = (1, (2, 3))
+"#;
+        assert!(check_function(code));
+    }
+
+    #[test]
+    fn test_nested_list_unpacking() {
+        let code = r#"
+def foo(self):
+    [a, [self.y, z]] = [1, [2, 3]]
+"#;
+        assert!(check_function(code));
+    }
+
+    #[test]
+    fn test_deeply_nested_unpacking() {
+        let code = r#"
+def foo(self):
+    (a, (b, (self.x, c))) = (1, (2, (3, 4)))
+"#;
+        assert!(check_function(code));
+    }
+
+    #[test]
+    fn test_starred_expression() {
+        let code = r#"
+def foo(self):
+    *self.x, = range(10)
+"#;
+        assert!(check_function(code));
+    }
+
+    #[test]
+    fn test_starred_in_tuple() {
+        let code = r#"
+def foo(self):
+    a, *self.rest = [1, 2, 3, 4]
+"#;
+        assert!(check_function(code));
+    }
+
+    #[test]
+    fn test_nested_function_no_leak() {
+        // Attribute assignment in nested function should not count
+        let code = r#"
+def foo(self):
+    def inner(self):
+        self.x = 1
+    return inner
+"#;
+        assert!(!check_function(code));
+    }
+
+    #[test]
+    fn test_nested_class_no_leak() {
+        // Attribute assignment in nested class should not count
+        let code = r#"
+def foo(self):
+    class Inner:
+        def method(self):
+            self.x = 1
+"#;
+        assert!(!check_function(code));
+    }
+
+    #[test]
+    fn test_attribute_in_if_statement() {
+        let code = r#"
+def foo(self):
+    if True:
+        self.x = 1
+"#;
+        assert!(check_function(code));
+    }
+
+    #[test]
+    fn test_attribute_in_while_loop() {
+        let code = r#"
+def foo(self):
+    while True:
+        self.x = 1
+        break
+"#;
+        assert!(check_function(code));
+    }
+
+    #[test]
+    fn test_attribute_in_for_loop() {
+        let code = r#"
+def foo(self):
+    for i in range(10):
+        self.x = i
+"#;
+        assert!(check_function(code));
+    }
+
+    #[test]
+    fn test_attribute_in_try_except() {
+        let code = r#"
+def foo(self):
+    try:
+        self.x = 1
+    except:
+        pass
+"#;
+        assert!(check_function(code));
+    }
+
+    #[test]
+    fn test_attribute_in_except_handler() {
+        let code = r#"
+def foo(self):
+    try:
+        pass
+    except Exception:
+        self.x = 1
+"#;
+        assert!(check_function(code));
+    }
+
+    #[test]
+    fn test_attribute_in_finally() {
+        let code = r#"
+def foo(self):
+    try:
+        pass
+    finally:
+        self.x = 1
+"#;
+        assert!(check_function(code));
+    }
+
+    #[test]
+    fn test_attribute_in_with_statement() {
+        let code = r#"
+def foo(self):
+    with open("file") as f:
+        self.x = 1
+"#;
+        assert!(check_function(code));
+    }
+
+    #[test]
+    fn test_attribute_assignment_after_nested_function() {
+        let code = r#"
+def foo(self):
+    def inner():
+        pass
+    self.x = 1
+"#;
+        assert!(check_function(code));
+    }
+
+    #[test]
+    fn test_multiple_assignment_targets() {
+        let code = r#"
+def foo(self):
+    self.x = y = 1
+"#;
+        assert!(check_function(code));
+    }
+
+    #[test]
+    fn test_different_param_name() {
+        let code = r#"
+def foo(obj):
+    obj.x = 1
+"#;
+        assert!(check_function(code));
+    }
+
+    #[test]
+    fn test_attribute_of_different_object() {
+        let code = r#"
+def foo(self):
+    other.x = 1
+"#;
+        assert!(!check_function(code));
+    }
+
+    #[test]
+    fn test_posonly_param() {
+        let code = r#"
+def foo(self, /):
+    self.x = 1
+"#;
+        assert!(check_function(code));
+    }
+
+    #[test]
+    fn test_posonly_param_no_assignment() {
+        let code = r#"
+def foo(self, /):
+    y = 1
+"#;
+        assert!(!check_function(code));
+    }
+
+    #[test]
+    fn test_empty_body() {
+        let code = r#"
+def foo(self):
+    pass
+"#;
+        assert!(!check_function(code));
+    }
+
+    #[test]
+    fn test_only_docstring() {
+        let code = r#"
+def foo(self):
+    """Docstring"""
+    pass
+"#;
+        assert!(!check_function(code));
+    }
+
+    #[test]
+    fn test_mixed_tuple_and_list() {
+        let code = r#"
+def foo(self):
+    (a, [self.x, b]) = (1, [2, 3])
+"#;
+        assert!(check_function(code));
+    }
+}
