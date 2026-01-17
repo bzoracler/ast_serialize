@@ -312,12 +312,9 @@ impl<'a> Serializer<'a> {
 
     /// Convert a column number (UTF-8 byte offset) to a Unicode code point offset
     /// if the line contains non-ASCII characters. Returns the column as-is for ASCII lines.
+    ///
+    /// Note: This should only be called when is_all_ascii is false (checked by caller).
     fn convert_column_to_codepoint(&self, line_number: usize, byte_column: usize) -> usize {
-        // Fast path: if entire file is ASCII, no conversion needed
-        if self.is_all_ascii {
-            return byte_column;
-        }
-
         // Check if this specific line has non-ASCII
         // Note: line_number is 1-indexed, but Vec is 0-indexed
         let line_idx = line_number.saturating_sub(1);
@@ -356,18 +353,25 @@ impl<'a> Serializer<'a> {
         let st_line = st_loc.line.get() as i64;
         let st_column_bytes = st_loc.column.get();
 
-        // Convert byte offset to code point offset for Python compatibility
-        let st_column = self.convert_column_to_codepoint(st_loc.line.get(), st_column_bytes) as i64;
-
-        self.write_int(st_line);
-        self.write_int(st_column);
-
         let end_loc = self.line_index.line_column(range.end(), self.text);
         let end_column_bytes = end_loc.column.get();
-        let end_column = self.convert_column_to_codepoint(end_loc.line.get(), end_column_bytes) as i64;
 
-        self.write_int((end_loc.line.get() as i64) - st_line);
-        self.write_int(end_column - st_column);
+        // Fast path for all-ASCII files: use byte offsets directly (no conversion needed)
+        if self.is_all_ascii {
+            self.write_int(st_line);
+            self.write_int(st_column_bytes as i64);
+            self.write_int((end_loc.line.get() as i64) - st_line);
+            self.write_int((end_column_bytes as i64) - (st_column_bytes as i64));
+        } else {
+            // Convert byte offset to code point offset for Python compatibility
+            let st_column = self.convert_column_to_codepoint(st_loc.line.get(), st_column_bytes) as i64;
+            let end_column = self.convert_column_to_codepoint(end_loc.line.get(), end_column_bytes) as i64;
+
+            self.write_int(st_line);
+            self.write_int(st_column);
+            self.write_int((end_loc.line.get() as i64) - st_line);
+            self.write_int(end_column - st_column);
+        }
     }
 
     fn serialize_block(&mut self, block: &Vec<ast::Stmt>) {
