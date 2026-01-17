@@ -156,21 +156,30 @@ pub(crate) fn serialize_python_file(
         )
     })?;
 
-    if !source_kind.source_code().is_ascii() {
-        panic!("non-ascii source not supported");
-    }
-
     let line_index = LineIndex::from_source_text(source_kind.source_code());
+    let source_text = source_kind.source_code();
+
+    // Check if file is all ASCII and build per-line non-ASCII flags if needed
+    let is_all_ascii = source_text.is_ascii();
+    let lines_with_non_ascii = if is_all_ascii {
+        Vec::new()  // No need to track per-line if whole file is ASCII
+    } else {
+        // Build a Vec<bool> indicating which lines have non-ASCII characters
+        source_text
+            .lines()
+            .map(|line| !line.is_ascii())
+            .collect()
+    };
 
     // Parse the file - this always returns a result, even with syntax errors
-    let parsed = parse_unchecked(source_kind.source_code(), ParseOptions::from(source_type));
+    let parsed = parse_unchecked(source_text, ParseOptions::from(source_type));
 
     // Extract syntax errors with location information
     let syntax_errors: Vec<SyntaxError> = parsed
         .errors()
         .iter()
         .map(|error| {
-            let location = line_index.line_column(error.location.start(), source_kind.source_code());
+            let location = line_index.line_column(error.location.start(), source_text);
             SyntaxError {
                 line: location.line.get(),
                 column: location.column.get(),
@@ -182,7 +191,7 @@ pub(crate) fn serialize_python_file(
     // Extract type: ignore comment line numbers from tokens
     let type_ignore_lines = extract_type_ignore_lines(
         parsed.tokens(),
-        source_kind.source_code(),
+        source_text,
         &line_index,
     );
 
@@ -192,9 +201,11 @@ pub(crate) fn serialize_python_file(
         imports: Vec::new(),
         import_froms: Vec::new(),
         line_index,
-        text: source_kind.source_code(),
+        text: source_text,
         skip_function_bodies,
         in_class: false,
+        is_all_ascii,
+        lines_with_non_ascii,
     };
     parsed.syntax().serialize(&mut ser);
 
@@ -223,6 +234,8 @@ struct Serializer<'a> {
     text: &'a str,
     skip_function_bodies: bool,  // Whether to omit function bodies without visible effects
     in_class: bool,  // Whether we're currently inside a class definition
+    is_all_ascii: bool,  // Whether the entire file contains only ASCII characters
+    lines_with_non_ascii: Vec<bool>,  // Per-line flags: true if line has non-ASCII (empty if is_all_ascii)
 }
 
 impl<'a> Serializer<'a> {
@@ -284,16 +297,77 @@ impl<'a> Serializer<'a> {
         }
     }
 
+    /// Find the largest byte offset <= target that is a UTF-8 character boundary.
+    /// Similar to the unstable str::floor_char_boundary method.
+    fn floor_char_boundary(&self, s: &str, mut target: usize) -> usize {
+        if target > s.len() {
+            target = s.len();
+        }
+        // Walk backwards until we find a character boundary
+        while target > 0 && !s.is_char_boundary(target) {
+            target -= 1;
+        }
+        target
+    }
+
+    /// Convert a column number (UTF-8 byte offset) to a Unicode code point offset
+    /// if the line contains non-ASCII characters. Returns the column as-is for ASCII lines.
+    fn convert_column_to_codepoint(&self, line_number: usize, byte_column: usize) -> usize {
+        // Fast path: if entire file is ASCII, no conversion needed
+        if self.is_all_ascii {
+            return byte_column;
+        }
+
+        // Check if this specific line has non-ASCII
+        // Note: line_number is 1-indexed, but Vec is 0-indexed
+        let line_idx = line_number.saturating_sub(1);
+        if line_idx < self.lines_with_non_ascii.len() && self.lines_with_non_ascii[line_idx] {
+            // This line has non-ASCII, need to convert
+            // Get the byte offset of the start of this line in the full text
+            let line_start = self.line_index.line_start(
+                ruff_source_file::OneIndexed::from_zero_indexed(line_idx),
+                self.text,
+            );
+            let line_start_byte = line_start.to_usize();
+
+            // Calculate the absolute byte position in the full text
+            let target_byte = line_start_byte + byte_column;
+
+            // Make sure we don't go past the end of the text and are at a char boundary
+            let safe_target = target_byte.min(self.text.len());
+
+            // Ensure we're at a valid character boundary
+            let char_boundary = self.floor_char_boundary(self.text, safe_target);
+
+            // Extract the portion of the line from start to the target column
+            let line_prefix = &self.text[line_start_byte..char_boundary];
+
+            // Count code points in this prefix
+            line_prefix.chars().count()
+        } else {
+            // This line is ASCII, no conversion needed
+            byte_column
+        }
+    }
+
     fn write_location(&mut self, range: TextRange) {
         self.write_tag(TAG_LOCATION);
         let st_loc = self.line_index.line_column(range.start(), self.text);
         let st_line = st_loc.line.get() as i64;
-        let st_column = st_loc.column.get() as i64;
+        let st_column_bytes = st_loc.column.get();
+
+        // Convert byte offset to code point offset for Python compatibility
+        let st_column = self.convert_column_to_codepoint(st_loc.line.get(), st_column_bytes) as i64;
+
         self.write_int(st_line);
         self.write_int(st_column);
+
         let end_loc = self.line_index.line_column(range.end(), self.text);
+        let end_column_bytes = end_loc.column.get();
+        let end_column = self.convert_column_to_codepoint(end_loc.line.get(), end_column_bytes) as i64;
+
         self.write_int((end_loc.line.get() as i64) - st_line);
-        self.write_int((end_loc.column.get() as i64) - st_column);
+        self.write_int(end_column - st_column);
     }
 
     fn serialize_block(&mut self, block: &Vec<ast::Stmt>) {
@@ -1775,6 +1849,12 @@ mod tests {
 
     fn make_ser<'a>(text: &'a str) -> Serializer<'a> {
         let index = LineIndex::from_source_text(text);
+        let is_all_ascii = text.is_ascii();
+        let lines_with_non_ascii = if is_all_ascii {
+            Vec::new()
+        } else {
+            text.lines().map(|line| !line.is_ascii()).collect()
+        };
         Serializer {
             bytes: Vec::new(),
             imports: Vec::new(),
@@ -1783,6 +1863,8 @@ mod tests {
             text,
             skip_function_bodies: false,
             in_class: false,
+            is_all_ascii,
+            lines_with_non_ascii,
         }
     }
 
@@ -1845,20 +1927,91 @@ mod tests {
     }
 
     #[test]
+    fn test_unicode_support() {
+        // Test that we can parse and serialize files with Unicode characters
+        let text = "# Comment with 中文\ndef привет():\n    x = \"🎉\"\n";
+        let opt = ParseOptions::from(PySourceType::Python);
+        let ast = parse_unchecked(text, opt).into_syntax();
+        let mut ser = make_ser(text);
+
+        // Should not panic
+        ast.serialize(&mut ser);
+
+        // Verify that is_all_ascii is correctly set
+        assert!(!ser.is_all_ascii);
+
+        // Verify that lines_with_non_ascii is correctly populated
+        assert_eq!(ser.lines_with_non_ascii.len(), 3);
+        assert!(ser.lines_with_non_ascii[0]); // Line with Chinese
+        assert!(ser.lines_with_non_ascii[1]); // Line with Cyrillic
+        assert!(ser.lines_with_non_ascii[2]); // Line with emoji
+    }
+
+    #[test]
+    fn test_mixed_ascii_unicode() {
+        // Test file with some ASCII and some Unicode lines
+        let text = "# ASCII comment\ndef hello():\n    x = \"мир\"\n    y = 42\n";
+        let ser = make_ser(text);
+
+        assert!(!ser.is_all_ascii);
+        assert_eq!(ser.lines_with_non_ascii.len(), 4);
+        assert!(!ser.lines_with_non_ascii[0]); // ASCII line
+        assert!(!ser.lines_with_non_ascii[1]); // ASCII line
+        assert!(ser.lines_with_non_ascii[2]);  // Unicode line
+        assert!(!ser.lines_with_non_ascii[3]); // ASCII line
+    }
+
+    #[test]
+    fn test_all_ascii_optimization() {
+        // Test that all-ASCII files use the optimized path
+        let text = "def hello():\n    return 42\n";
+        let ser = make_ser(text);
+
+        assert!(ser.is_all_ascii);
+        assert!(ser.lines_with_non_ascii.is_empty()); // No per-line tracking
+    }
+
+    #[test]
+    fn test_unicode_with_crlf_line_endings() {
+        // Test that Unicode handling works correctly with Windows (CRLF) line endings
+        let text = "# Comment with 中文\r\ndef привет():\r\n    x = \"🎉\"\r\n";
+        let opt = ParseOptions::from(PySourceType::Python);
+        let ast = parse_unchecked(text, opt).into_syntax();
+        let mut ser = make_ser(text);
+
+        // Should not panic with CRLF line endings
+        ast.serialize(&mut ser);
+
+        // Verify that is_all_ascii is correctly set
+        assert!(!ser.is_all_ascii);
+
+        // Verify that lines_with_non_ascii is correctly populated
+        assert_eq!(ser.lines_with_non_ascii.len(), 3);
+        assert!(ser.lines_with_non_ascii[0]); // Line with Chinese
+        assert!(ser.lines_with_non_ascii[1]); // Line with Cyrillic
+        assert!(ser.lines_with_non_ascii[2]); // Line with emoji
+    }
+
+    #[test]
+    fn test_mixed_crlf_and_lf() {
+        // Test files with mixed line endings (both CRLF and LF)
+        let text = "# ASCII with CRLF\r\ndef hello():\n    x = \"мир\"\r\n    y = 42\n";
+        let ser = make_ser(text);
+
+        assert!(!ser.is_all_ascii);
+        assert_eq!(ser.lines_with_non_ascii.len(), 4);
+        assert!(!ser.lines_with_non_ascii[0]); // ASCII line with CRLF
+        assert!(!ser.lines_with_non_ascii[1]); // ASCII line with LF
+        assert!(ser.lines_with_non_ascii[2]);  // Unicode line with CRLF
+        assert!(!ser.lines_with_non_ascii[3]); // ASCII line with LF
+    }
+
+    #[test]
     fn print_hello() {
         let opt = ParseOptions::from(PySourceType::Python);
         let text = "print('hello')";
         let ast = parse_unchecked(text, opt).into_syntax();
-        let index = LineIndex::from_source_text(text);
-        let mut ser = Serializer {
-            bytes: Vec::new(),
-            imports: Vec::new(),
-            import_froms: Vec::new(),
-            line_index: index,
-            text,
-            skip_function_bodies: false,
-            in_class: false,
-        };
+        let mut ser = make_ser(text);
         ast.serialize(&mut ser);
         let _ = ser;  // TODO: drop when not needed
 
