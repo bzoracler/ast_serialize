@@ -1292,7 +1292,13 @@ impl Ser for ast::Expr {
                 ser.write_location(e.range());
             }
             ast::Expr::List(e) => {
-                ser.write_tag(TAG_LIST_EXPR);
+                // In mypy, lists in assignment contexts (Store) are converted to tuples
+                // e.g., `a, [b, c] = x, [1, 2]` has `[b, c]` as TupleExpr on LHS
+                if matches!(e.ctx, ast::ExprContext::Store) {
+                    ser.write_tag(TAG_TUPLE_EXPR);
+                } else {
+                    ser.write_tag(TAG_LIST_EXPR);
+                }
                 e.elts.serialize(ser);
                 ser.write_location(e.range());
             }
