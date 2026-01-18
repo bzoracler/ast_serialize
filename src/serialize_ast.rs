@@ -106,6 +106,7 @@ const TAG_UNION_TYPE: u8 = 115;
 const TAG_LIST_TYPE: u8 = 118;
 const TAG_ELLIPSIS_TYPE: u8 = 119;
 const TAG_RAW_EXPRESSION_TYPE: u8 = 120;
+const TAG_CALL_TYPE: u8 = 121;
 const TAG_UNPACK_TYPE: u8 = 105;
 
 // Argument kinds (must match mypy/nodes.py)
@@ -1581,6 +1582,34 @@ fn serialize_type(ser: &mut Serializer, t: &ast::Expr) {
             ser.write_int(e.elts.len() as i64);
             for item in &e.elts {
                 serialize_type(ser, item);
+            }
+        }
+        ast::Expr::Call(c) => {
+            // Handle Call in type context (e.g., Arg(int, 'x'))
+            ser.write_tag(TAG_CALL_TYPE);
+
+            // Serialize callee
+            serialize_type(ser, &c.func);
+
+            // Serialize positional arguments
+            ser.write_tag(TAG_LIST_GEN);
+            ser.write_int(c.arguments.args.len() as i64);
+            for arg in &c.arguments.args {
+                serialize_type(ser, arg);
+            }
+
+            // Serialize keyword arguments (name, value pairs)
+            ser.write_tag(TAG_LIST_GEN);
+            ser.write_int(c.arguments.keywords.len() as i64);
+            for keyword in &c.arguments.keywords {
+                // Write keyword name (could be None for **kwargs)
+                if let Some(name) = &keyword.arg {
+                    ser.write_bytes(name.as_bytes());
+                } else {
+                    ser.write_tag(TAG_LITERAL_NONE);
+                }
+                // Write keyword value
+                serialize_type(ser, &keyword.value);
             }
         }
         ast::Expr::EllipsisLiteral(_) => {
