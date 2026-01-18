@@ -950,6 +950,8 @@ impl Ser for ast::Stmt {
                 ser.serialize_block(&f.body);
                 // Serialize else clause
                 ser.serialize_block(&f.orelse);
+                // Serialize is_async flag
+                ser.write_bool(f.is_async);
                 ser.write_location(f.range());
             }
             ast::Stmt::With(w) => {
@@ -965,6 +967,8 @@ impl Ser for ast::Stmt {
                 }
                 // Serialize body
                 ser.serialize_block(&w.body);
+                // Serialize is_async flag
+                ser.write_bool(w.is_async);
                 ser.write_location(w.range());
             }
             ast::Stmt::Pass(s) => {
