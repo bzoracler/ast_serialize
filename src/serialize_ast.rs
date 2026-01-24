@@ -361,18 +361,20 @@ impl<'a> Serializer<'a> {
         let end_column_bytes = end_loc.column.get();
 
         // Fast path for all-ASCII files: use byte offsets directly (no conversion needed)
+        // Note: Ruff uses 1-based columns, but mypy expects 0-based, so subtract 1
         if self.is_all_ascii {
             self.write_int(st_line);
-            self.write_int(st_column_bytes as i64);
+            self.write_int((st_column_bytes - 1) as i64);  // Convert to 0-based
             self.write_int((end_loc.line.get() as i64) - st_line);
             self.write_int((end_column_bytes as i64) - (st_column_bytes as i64));
         } else {
             // Convert byte offset to code point offset for Python compatibility
+            // Note: Ruff uses 1-based columns, but mypy expects 0-based, so subtract 1
             let st_column = self.convert_column_to_codepoint(st_loc.line.get(), st_column_bytes) as i64;
             let end_column = self.convert_column_to_codepoint(end_loc.line.get(), end_column_bytes) as i64;
 
             self.write_int(st_line);
-            self.write_int(st_column);
+            self.write_int(st_column - 1);  // Convert to 0-based
             self.write_int((end_loc.line.get() as i64) - st_line);
             self.write_int(end_column - st_column);
         }
