@@ -17,7 +17,7 @@ venv/
 .venv/
 env/
 
-# IDE
+# IDE (but keep .cargo/ for config)
 .vscode/
 .idea/
 *.swp

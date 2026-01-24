@@ -1,0 +1,4 @@
+doc-valid-idents = [
+    "CPython",
+    "PyO3",
+]

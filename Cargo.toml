@@ -38,3 +38,18 @@ stable-abi = ["pyo3/abi3-py39"]
 free-threaded = []
 # Turn off rayon for profiling
 singlethreaded = []
+
+[lints.rust]
+unsafe_code = "warn"
+unreachable_pub = "warn"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -2 }
+# Allowed pedantic lints (adjust based on your preferences)
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+module_name_repetitions = "allow"
+# Restriction lints
+print_stdout = "warn"
+print_stderr = "warn"
+dbg_macro = "warn"
