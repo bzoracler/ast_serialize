@@ -1,14 +1,12 @@
 [package]
 name = "mypy_parser"
-version = "0.0.0"
+version = "0.1.0"
 publish = false
-authors = { workspace = true }
-edition = { workspace = true }
-rust-version = { workspace = true }
-homepage = { workspace = true }
-documentation = { workspace = true }
-repository = { workspace = true }
-license = { workspace = true }
+authors = ["Jukka Lehtosalo"]
+edition = "2021"
+rust-version = "1.80"
+license = "MIT"
+description = "Python extension that serializes Ruff AST for mypy"
 
 [lib]
 name = "ast_serialize"
@@ -19,18 +17,17 @@ crate-type = ["cdylib"]
 # Base features always enabled; abi3-py39 is added via stable-abi feature
 pyo3 = { version = "0.23", features = ["extension-module"] }
 
-# Ruff dependencies for parsing Python
-ruff_linter = { workspace = true }
-ruff_python_ast = { workspace = true }
-ruff_python_parser = { workspace = true }
-ruff_source_file = { workspace = true }
-ruff_text_size = { workspace = true }
+# Ruff dependencies for parsing Python - pinned to release tag
+ruff_python_ast = { git = "https://github.com/astral-sh/ruff", tag = "0.12.12" }
+ruff_python_parser = { git = "https://github.com/astral-sh/ruff", tag = "0.12.12" }
+ruff_source_file = { git = "https://github.com/astral-sh/ruff", tag = "0.12.12" }
+ruff_text_size = { git = "https://github.com/astral-sh/ruff", tag = "0.12.12" }
 
 # Error handling
-anyhow = { workspace = true }
+anyhow = "1.0"
 
 [dev-dependencies]
-indoc = { workspace = true }
+indoc = "2"
 
 [features]
 # Default: stable ABI for regular Python 3.9+
@@ -41,6 +38,3 @@ stable-abi = ["pyo3/abi3-py39"]
 free-threaded = []
 # Turn off rayon for profiling
 singlethreaded = []
-
-[lints]
-workspace = true
