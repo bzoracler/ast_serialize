@@ -1,5 +1,5 @@
 use pyo3::prelude::*;
-use pyo3::types::PyDict;
+use pyo3::types::{PyDict, PyTuple};
 use std::path::Path;
 
 mod serialize_ast;
@@ -51,7 +51,7 @@ fn parse(
     let py_type_ignores: Vec<PyObject> = type_ignore_lines
         .iter()
         .map(|(line, error_codes)| {
-            (*line, error_codes.clone()).into_py(py)
+            PyTuple::new(py, [line.into_pyobject(py).unwrap().into_any(), error_codes.into_pyobject(py).unwrap().into_any()]).unwrap().into()
         })
         .collect();
 
