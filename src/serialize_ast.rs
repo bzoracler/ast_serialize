@@ -716,7 +716,13 @@ impl Ser for ast::Stmt {
                 };
 
                 if should_serialize_body {
-                    ser.serialize_block(&f.body);
+                    if f.body.is_empty() {
+                        // Empty body due to syntax error - use serialize_empty_block
+                        // to ensure location is written (required by deserializer)
+                        ser.serialize_empty_block(f.range());
+                    } else {
+                        ser.serialize_block(&f.body);
+                    }
                 } else {
                     // Use the range covering the entire body (start of first stmt to end of last stmt)
                     let body_range = if !f.body.is_empty() {
