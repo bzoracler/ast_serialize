@@ -1632,6 +1632,14 @@ fn serialize_fstring_elements(ser: &mut Serializer, elems: Vec<&ast::Interpolate
 // Type Serialization Functions
 // ============================================================================
 
+/// Helper to serialize an invalid type annotation as RawExpressionType with typing.Any.
+/// This is used for expressions that are not valid in type contexts (e.g., 3.14, int + str).
+fn serialize_invalid_type(ser: &mut Serializer) {
+    ser.write_tag(TAG_RAW_EXPRESSION_TYPE);
+    ser.write_bytes(b"typing.Any");
+    ser.write_tag(TAG_LITERAL_NONE);
+}
+
 /// Main entry point for serializing type annotations.
 /// Handles all Python type expressions including names, attributes, subscripts,
 /// unions, literals, and forward references (string literals).
@@ -1663,13 +1671,13 @@ fn serialize_type(ser: &mut Serializer, t: &ast::Expr) {
                     ser.write_bytes(b"builtins.int");
                     ser.write_tagged_int(int_val);
                 } else {
-                    panic!(
-                        "Integer literal in type annotation too large for i64: {:?}",
-                        n.value
-                    );
+                    // Integer too large for i64 - serialize as invalid type
+                    serialize_invalid_type(ser);
                 }
             } else {
-                panic!("unsupported number literal in type: {:?}", n);
+                // Float/complex number literals are not valid in type annotations
+                // Serialize as invalid type
+                serialize_invalid_type(ser);
             }
         }
         ast::Expr::BinOp(e) => {
@@ -1678,7 +1686,9 @@ fn serialize_type(ser: &mut Serializer, t: &ast::Expr) {
                 serialize_union_type(ser, e, t.range(), None, None);
                 return;
             } else {
-                panic!("unsupported binary operator in type: {:?}", e.op);
+                // Other binary operators are not valid in type annotations
+                // Serialize as invalid type
+                serialize_invalid_type(ser);
             }
         }
         ast::Expr::List(e) => {
@@ -1727,8 +1737,9 @@ fn serialize_type(ser: &mut Serializer, t: &ast::Expr) {
             serialize_type(ser, &e.value);
         }
         ast::Expr::UnaryOp(e) => {
-            // Handle negative integer literals in types (e.g., Literal[-1])
+            // Handle unary operators on integer literals in types
             if matches!(e.op, ast::UnaryOp::USub) {
+                // Negative integer literal (e.g., Literal[-1])
                 if let Some(int_val) = extract_int_literal_value(t) {
                     ser.write_tag(TAG_RAW_EXPRESSION_TYPE);
                     ser.write_bytes(b"builtins.int");
@@ -1737,9 +1748,30 @@ fn serialize_type(ser: &mut Serializer, t: &ast::Expr) {
                     ser.write_location(e.range());
                     ser.write_end_tag();
                     return;
+                } else {
+                    // Negative number too large - serialize as invalid type
+                    serialize_invalid_type(ser);
                 }
+            } else if matches!(e.op, ast::UnaryOp::UAdd) {
+                // Positive unary operator (+) - preserve the underlying value
+                // This matches fastparse.py behavior where +5 returns the value unchanged
+                if let Some(int_val) = extract_int_literal_value(&e.operand) {
+                    ser.write_tag(TAG_RAW_EXPRESSION_TYPE);
+                    ser.write_bytes(b"builtins.int");
+                    ser.write_tagged_int(int_val);
+                    // Return early since we've already written location and end tag below
+                    ser.write_location(e.range());
+                    ser.write_end_tag();
+                    return;
+                } else {
+                    // Number too large or not an integer - serialize as invalid type
+                    serialize_invalid_type(ser);
+                }
+            } else {
+                // Other unary operators (not, ~, etc.) are not valid in type annotations
+                // Serialize as invalid type
+                serialize_invalid_type(ser);
             }
-            panic!("unsupported unary operator in type: {:?}", e);
         }
         ast::Expr::StringLiteral(s) => {
             // String literals in type context (forward references or Literal["x"])
@@ -1764,7 +1796,9 @@ fn serialize_type(ser: &mut Serializer, t: &ast::Expr) {
             ser.write_bytes(&result);
         }
         _ => {
-            panic!("unsupported type: {t:?}");
+            // Unsupported expression type in type annotation
+            // Serialize as invalid type
+            serialize_invalid_type(ser);
         }
     }
     ser.write_location(t.range());
@@ -1883,9 +1917,13 @@ fn serialize_attribute_type(
     original_str_expr: Option<&str>,
     original_str_fallback: Option<&str>,
 ) {
-    ser.write_tag(TAG_UNBOUND_TYPE);
     let mut v = Vec::new();
-    get_qualified_type_name(&mut v, expr);
+    if !get_qualified_type_name(&mut v, expr) {
+        // Invalid expression for qualified name - serialize as invalid type
+        serialize_invalid_type(ser);
+        return;
+    }
+    ser.write_tag(TAG_UNBOUND_TYPE);
     ser.write_bytes(&v);
     ser.write_tag(TAG_LIST_GEN);
     ser.write_int(0);
@@ -1910,9 +1948,13 @@ fn serialize_subscript_type(
     original_str_expr: Option<&str>,
     original_str_fallback: Option<&str>,
 ) {
-    ser.write_tag(TAG_UNBOUND_TYPE);
     let mut v = Vec::new();
-    get_qualified_type_name(&mut v, &subscript.value);
+    if !get_qualified_type_name(&mut v, &subscript.value) {
+        // Invalid expression for qualified name - serialize as invalid type
+        serialize_invalid_type(ser);
+        return;
+    }
+    ser.write_tag(TAG_UNBOUND_TYPE);
     ser.write_bytes(&v);
     ser.write_tag(TAG_LIST_GEN);
     match subscript.slice.as_ref() {
@@ -1954,18 +1996,25 @@ fn serialize_simple_unbound_type(ser: &mut Serializer, name: &[u8]) {
 }
 
 /// Helper to build a qualified type name from nested attributes (e.g., `foo.bar.Baz`).
-fn get_qualified_type_name(v: &mut Vec<u8>, e: &ast::Expr) {
+/// Returns true if successful, false if the expression is not a valid qualified name.
+fn get_qualified_type_name(v: &mut Vec<u8>, e: &ast::Expr) -> bool {
     match e {
         ast::Expr::Name(e) => {
             v.extend_from_slice(e.id.as_bytes());
+            true
         }
         ast::Expr::Attribute(e) => {
-            get_qualified_type_name(v, &e.value);
-            v.extend_from_slice(b".");
-            v.extend_from_slice(e.attr.as_bytes());
+            if get_qualified_type_name(v, &e.value) {
+                v.extend_from_slice(b".");
+                v.extend_from_slice(e.attr.as_bytes());
+                true
+            } else {
+                false
+            }
         }
         _ => {
-            panic!("unimplemented")
+            // Not a valid qualified name - caller should handle this
+            false
         }
     }
 }
