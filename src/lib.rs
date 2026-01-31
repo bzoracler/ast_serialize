@@ -3,6 +3,7 @@ use pyo3::types::{PyDict, PyTuple};
 use std::path::Path;
 
 mod func_effect_visitor;
+pub mod reachability;
 mod serialize_ast;
 pub mod type_comment;
 
