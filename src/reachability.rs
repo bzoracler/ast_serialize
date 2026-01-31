@@ -1,3 +1,5 @@
+use ruff_python_ast as ast;
+
 /// Inferred truth value of an expression during reachability analysis.
 ///
 /// These values match the constants in mypy.reachability:
@@ -29,6 +31,19 @@ impl TruthValue {
     }
 }
 
+/// Infer whether the given condition is always true/false.
+pub fn infer_condition_value(
+    _expr: &ast::Expr,
+    _python_version: (u32, u32),
+    _platform: &str,
+    _always_true: &[String],
+    _always_false: &[String],
+) -> TruthValue {
+    // TODO: Implement condition value inference
+    // This is a placeholder that always returns unknown
+    TruthValue::TruthValueUnknown
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -53,5 +68,28 @@ mod tests {
             TruthValue::TruthValueUnknown.invert(),
             TruthValue::TruthValueUnknown
         );
+    }
+
+    #[test]
+    fn test_infer_condition_value_placeholder() {
+        use ruff_python_parser::{Mode, ParseOptions, parse_unchecked};
+
+        // Parse a simple expression
+        let code = "foo";
+        let parsed = parse_unchecked(code, ParseOptions::from(Mode::Expression));
+        let ast::Mod::Expression(expr_mod) = parsed.into_syntax() else {
+            panic!("Expected expression");
+        };
+
+        // Call infer_condition_value with the parsed expression
+        let result = infer_condition_value(
+            &expr_mod.body,
+            (3, 10), // Python 3.10
+            "linux",
+            &[],
+            &[],
+        );
+
+        assert_eq!(result, TruthValue::TruthValueUnknown);
     }
 }
