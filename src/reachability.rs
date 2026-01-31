@@ -57,8 +57,14 @@ pub fn infer_condition_value(
     match expr {
         // Handle unary "not" expressions
         ast::Expr::UnaryOp(unary) if matches!(unary.op, ast::UnaryOp::Not) => {
-            // TODO: Recursively infer and invert
-            TruthValue::TruthValueUnknown
+            let positive = infer_condition_value(
+                &unary.operand,
+                python_version,
+                platform,
+                always_true,
+                always_false,
+            );
+            positive.invert()
         }
 
         // Handle name expressions (e.g., PY3, MYPY, TYPE_CHECKING)
@@ -156,5 +162,14 @@ mod tests {
     fn test_py2_and_py3() {
         assert_eq!(infer_expr("PY2"), TruthValue::AlwaysFalse);
         assert_eq!(infer_expr("PY3"), TruthValue::AlwaysTrue);
+    }
+
+    #[test]
+    fn test_unary_not() {
+        assert_eq!(infer_expr("not MYPY"), TruthValue::MypyFalse);
+        assert_eq!(infer_expr("not TYPE_CHECKING"), TruthValue::MypyFalse);
+        assert_eq!(infer_expr("not PY2"), TruthValue::AlwaysTrue);
+        assert_eq!(infer_expr("not PY3"), TruthValue::AlwaysFalse);
+        assert_eq!(infer_expr("not foo"), TruthValue::TruthValueUnknown);
     }
 }
