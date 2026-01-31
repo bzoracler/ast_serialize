@@ -29,6 +29,15 @@ pub enum SysVersionInfo {
     Slice(Option<i32>, Option<i32>),
 }
 
+/// Represents an integer or tuple of integers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IntOrTuple {
+    /// Single integer value
+    Int(i32),
+    /// Tuple of integer values
+    Tuple(Vec<i32>),
+}
+
 impl TruthValue {
     /// Returns the inverted truth value (for handling `not` expressions).
     pub fn invert(self) -> Self {
@@ -70,6 +79,26 @@ fn expr_to_int(expr: &ast::Expr) -> Option<i32> {
             return int_val.as_i32();
         }
     }
+    None
+}
+
+/// Check if an expression is an integer or tuple of integers.
+fn contains_int_or_tuple_of_ints(expr: &ast::Expr) -> Option<IntOrTuple> {
+    // Check for single integer
+    if let Some(int_val) = expr_to_int(expr) {
+        return Some(IntOrTuple::Int(int_val));
+    }
+
+    // Check for tuple of integers
+    if let ast::Expr::Tuple(tuple) = expr {
+        let mut values = Vec::with_capacity(tuple.elts.len());
+        for item in &tuple.elts {
+            let int_val = expr_to_int(item)?;
+            values.push(int_val);
+        }
+        return Some(IntOrTuple::Tuple(values));
+    }
+
     None
 }
 
@@ -468,6 +497,63 @@ mod tests {
         // Not an attribute expression
         assert!(!is_sys_attr(&parse_expr("platform"), "platform"));
         assert!(!is_sys_attr(&parse_expr("sys"), "sys"));
+    }
+
+    #[test]
+    fn test_contains_int_or_tuple_of_ints() {
+        use ruff_python_parser::{Mode, ParseOptions, parse_unchecked};
+
+        let parse_expr = |code: &str| {
+            let parsed = parse_unchecked(code, ParseOptions::from(Mode::Expression));
+            let ast::Mod::Expression(expr_mod) = parsed.into_syntax() else {
+                panic!("Expected expression");
+            };
+            expr_mod.body
+        };
+
+        // Single integer
+        assert_eq!(
+            contains_int_or_tuple_of_ints(&parse_expr("42")),
+            Some(IntOrTuple::Int(42))
+        );
+        assert_eq!(
+            contains_int_or_tuple_of_ints(&parse_expr("0")),
+            Some(IntOrTuple::Int(0))
+        );
+
+        // Tuple of integers
+        assert_eq!(
+            contains_int_or_tuple_of_ints(&parse_expr("(3, 10)")),
+            Some(IntOrTuple::Tuple(vec![3, 10]))
+        );
+        assert_eq!(
+            contains_int_or_tuple_of_ints(&parse_expr("(3, 8, 2)")),
+            Some(IntOrTuple::Tuple(vec![3, 8, 2]))
+        );
+
+        // Empty tuple
+        assert_eq!(
+            contains_int_or_tuple_of_ints(&parse_expr("()")),
+            Some(IntOrTuple::Tuple(vec![]))
+        );
+
+        // Single element tuple
+        assert_eq!(
+            contains_int_or_tuple_of_ints(&parse_expr("(5,)")),
+            Some(IntOrTuple::Tuple(vec![5]))
+        );
+
+        // Not an integer or tuple of integers
+        assert_eq!(contains_int_or_tuple_of_ints(&parse_expr("'hello'")), None);
+        assert_eq!(contains_int_or_tuple_of_ints(&parse_expr("3.14")), None);
+        assert_eq!(
+            contains_int_or_tuple_of_ints(&parse_expr("(1, 'a')")),
+            None
+        );
+        assert_eq!(
+            contains_int_or_tuple_of_ints(&parse_expr("(1, 2.5)")),
+            None
+        );
     }
 
     #[test]
