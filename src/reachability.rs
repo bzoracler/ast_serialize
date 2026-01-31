@@ -62,8 +62,14 @@ pub fn infer_condition_value(
         }
 
         // Handle name expressions (e.g., PY3, MYPY, TYPE_CHECKING)
-        ast::Expr::Name(_name) => {
-            // TODO: Check for special names and always_true/always_false lists
+        ast::Expr::Name(name) => {
+            let name_str = name.id.as_str();
+
+            if name_str == "MYPY" || name_str == "TYPE_CHECKING" {
+                return TruthValue::MypyTrue;
+            }
+
+            // TODO: Check for PY2, PY3, and always_true/always_false lists
             TruthValue::TruthValueUnknown
         }
 
@@ -124,26 +130,26 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_infer_condition_value_placeholder() {
+    /// Helper to parse an expression and infer its truth value
+    fn infer_expr(expr_str: &str) -> TruthValue {
         use ruff_python_parser::{Mode, ParseOptions, parse_unchecked};
 
-        // Parse a simple expression
-        let code = "foo";
-        let parsed = parse_unchecked(code, ParseOptions::from(Mode::Expression));
+        let parsed = parse_unchecked(expr_str, ParseOptions::from(Mode::Expression));
         let ast::Mod::Expression(expr_mod) = parsed.into_syntax() else {
             panic!("Expected expression");
         };
 
-        // Call infer_condition_value with the parsed expression
-        let result = infer_condition_value(
-            &expr_mod.body,
-            (3, 10), // Python 3.10
-            "linux",
-            &[],
-            &[],
-        );
+        infer_condition_value(&expr_mod.body, (3, 10), "linux", &[], &[])
+    }
 
-        assert_eq!(result, TruthValue::TruthValueUnknown);
+    #[test]
+    fn test_infer_condition_value_placeholder() {
+        assert_eq!(infer_expr("foo"), TruthValue::TruthValueUnknown);
+    }
+
+    #[test]
+    fn test_mypy_and_type_checking() {
+        assert_eq!(infer_expr("MYPY"), TruthValue::MypyTrue);
+        assert_eq!(infer_expr("TYPE_CHECKING"), TruthValue::MypyTrue);
     }
 }
