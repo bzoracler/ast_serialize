@@ -101,6 +101,15 @@ const TAG_NONLOCAL_DECL: u8 = 212;
 const TAG_AWAIT_EXPR: u8 = 213;
 const TAG_BIG_INT_EXPR: u8 = 214;
 const TAG_IMPORT_ALL: u8 = 215;
+const TAG_MATCH_STMT: u8 = 216;
+const TAG_AS_PATTERN: u8 = 217;
+const TAG_OR_PATTERN: u8 = 218;
+const TAG_VALUE_PATTERN: u8 = 219;
+const TAG_SINGLETON_PATTERN: u8 = 220;
+const TAG_SEQUENCE_PATTERN: u8 = 221;
+const TAG_STARRED_PATTERN: u8 = 222;
+const TAG_MAPPING_PATTERN: u8 = 223;
+const TAG_CLASS_PATTERN: u8 = 224;
 const TAG_UNBOUND_TYPE: u8 = 104;
 const TAG_UNION_TYPE: u8 = 115;
 const TAG_LIST_TYPE: u8 = 118;
@@ -1202,6 +1211,23 @@ impl Ser for ast::Stmt {
                 }
                 ser.write_location(n.range());
             }
+            ast::Stmt::Match(m) => {
+                ser.write_tag(TAG_MATCH_STMT);
+                // Serialize subject expression
+                m.subject.serialize(ser);
+                // Write number of cases
+                ser.write_tagged_int(m.cases.len() as i64);
+                // Serialize each case
+                for case in &m.cases {
+                    // Serialize pattern
+                    case.pattern.serialize(ser);
+                    // Serialize optional guard
+                    case.guard.serialize(ser);
+                    // Serialize body
+                    ser.serialize_block(&case.body);
+                }
+                ser.write_location(m.range());
+            }
             _ => {
                 panic!("unsupported: {self:?}");
             }
@@ -1578,6 +1604,122 @@ impl Ser for ast::Expr {
             }
             _ => {
                 panic!("unsupported: {self:?}");
+            }
+        };
+        ser.write_end_tag()
+    }
+}
+
+impl Ser for ast::Pattern {
+    fn serialize(&self, ser: &mut Serializer) {
+        match self {
+            ast::Pattern::MatchAs(p) => {
+                ser.write_tag(TAG_AS_PATTERN);
+                // Serialize optional pattern
+                if let Some(pattern) = &p.pattern {
+                    ser.write_bool(true);
+                    pattern.serialize(ser);
+                } else {
+                    ser.write_bool(false);
+                }
+                // Serialize optional name
+                if let Some(name) = &p.name {
+                    ser.write_bool(true);
+                    ser.write_bytes(name.as_bytes());
+                    ser.write_location(name.range);
+                } else {
+                    ser.write_bool(false);
+                }
+                ser.write_location(p.range());
+            }
+            ast::Pattern::MatchOr(p) => {
+                ser.write_tag(TAG_OR_PATTERN);
+                // Write number of patterns
+                ser.write_tagged_int(p.patterns.len() as i64);
+                // Serialize each pattern
+                for pattern in &p.patterns {
+                    pattern.serialize(ser);
+                }
+                ser.write_location(p.range());
+            }
+            ast::Pattern::MatchValue(p) => {
+                ser.write_tag(TAG_VALUE_PATTERN);
+                // Serialize value expression
+                p.value.serialize(ser);
+                ser.write_location(p.range());
+            }
+            ast::Pattern::MatchSingleton(p) => {
+                ser.write_tag(TAG_SINGLETON_PATTERN);
+                // Serialize singleton value (True, False, or None)
+                match p.value {
+                    ast::Singleton::True => ser.write_bool(true),
+                    ast::Singleton::False => ser.write_bool(false),
+                    ast::Singleton::None => {
+                        // Special marker for None
+                        ser.write_tag(TAG_LITERAL_NONE);
+                    }
+                }
+                ser.write_location(p.range());
+            }
+            ast::Pattern::MatchSequence(p) => {
+                ser.write_tag(TAG_SEQUENCE_PATTERN);
+                // Write number of patterns
+                ser.write_tagged_int(p.patterns.len() as i64);
+                // Serialize each pattern
+                for pattern in &p.patterns {
+                    pattern.serialize(ser);
+                }
+                ser.write_location(p.range());
+            }
+            ast::Pattern::MatchStar(p) => {
+                ser.write_tag(TAG_STARRED_PATTERN);
+                // Serialize optional capture name
+                if let Some(name) = &p.name {
+                    ser.write_bool(true);
+                    ser.write_bytes(name.as_bytes());
+                    ser.write_location(name.range);
+                } else {
+                    ser.write_bool(false);
+                }
+                ser.write_location(p.range());
+            }
+            ast::Pattern::MatchMapping(p) => {
+                ser.write_tag(TAG_MAPPING_PATTERN);
+                // Write number of key-value pairs
+                ser.write_tagged_int(p.keys.len() as i64);
+                // Serialize keys and patterns
+                for (key, pattern) in p.keys.iter().zip(&p.patterns) {
+                    key.serialize(ser);
+                    pattern.serialize(ser);
+                }
+                // Serialize optional rest pattern
+                if let Some(rest) = &p.rest {
+                    ser.write_bool(true);
+                    ser.write_bytes(rest.as_bytes());
+                    ser.write_location(rest.range);
+                } else {
+                    ser.write_bool(false);
+                }
+                ser.write_location(p.range());
+            }
+            ast::Pattern::MatchClass(p) => {
+                ser.write_tag(TAG_CLASS_PATTERN);
+                // Serialize class reference
+                p.cls.serialize(ser);
+                // Write number of positional patterns
+                ser.write_tagged_int(p.arguments.patterns.len() as i64);
+                // Serialize positional patterns
+                for pattern in &p.arguments.patterns {
+                    pattern.serialize(ser);
+                }
+                // Write number of keyword patterns
+                ser.write_tagged_int(p.arguments.keywords.len() as i64);
+                // Serialize keyword patterns
+                for keyword in &p.arguments.keywords {
+                    ser.write_bytes(keyword.attr.as_bytes());
+                    keyword.pattern.serialize(ser);
+                }
+                ser.write_location(p.range());
             }
         };
         ser.write_end_tag()
