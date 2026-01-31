@@ -63,14 +63,13 @@ pub fn infer_condition_value(
 
         // Handle name expressions (e.g., PY3, MYPY, TYPE_CHECKING)
         ast::Expr::Name(name) => {
-            let name_str = name.id.as_str();
-
-            if name_str == "MYPY" || name_str == "TYPE_CHECKING" {
-                return TruthValue::MypyTrue;
+            match name.id.as_str() {
+                "MYPY" | "TYPE_CHECKING" => TruthValue::MypyTrue,
+                "PY2" => TruthValue::AlwaysFalse,
+                "PY3" => TruthValue::AlwaysTrue,
+                // TODO: Check always_true/always_false lists
+                _ => TruthValue::TruthValueUnknown,
             }
-
-            // TODO: Check for PY2, PY3, and always_true/always_false lists
-            TruthValue::TruthValueUnknown
         }
 
         // Handle attribute expressions (e.g., sys.platform, sys.version_info)
@@ -151,5 +150,11 @@ mod tests {
     fn test_mypy_and_type_checking() {
         assert_eq!(infer_expr("MYPY"), TruthValue::MypyTrue);
         assert_eq!(infer_expr("TYPE_CHECKING"), TruthValue::MypyTrue);
+    }
+
+    #[test]
+    fn test_py2_and_py3() {
+        assert_eq!(infer_expr("PY2"), TruthValue::AlwaysFalse);
+        assert_eq!(infer_expr("PY3"), TruthValue::AlwaysTrue);
     }
 }
