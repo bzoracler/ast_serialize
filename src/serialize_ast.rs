@@ -110,6 +110,7 @@ const TAG_SEQUENCE_PATTERN: u8 = 221;
 const TAG_STARRED_PATTERN: u8 = 222;
 const TAG_MAPPING_PATTERN: u8 = 223;
 const TAG_CLASS_PATTERN: u8 = 224;
+const TAG_TYPE_ALIAS_STMT: u8 = 225;
 const TAG_UNBOUND_TYPE: u8 = 104;
 const TAG_UNION_TYPE: u8 = 115;
 const TAG_LIST_TYPE: u8 = 118;
@@ -125,6 +126,11 @@ const ARG_STAR: i64 = 2; // *args
 const ARG_NAMED: i64 = 3; // Keyword-only argument
 const ARG_STAR2: i64 = 4; // **kwargs
 const ARG_NAMED_OPT: i64 = 5; // Keyword-only argument with default
+
+// TypeParam kinds (must match mypy/nodes.py)
+const TYPE_VAR_KIND: i64 = 0; // TypeVar
+const PARAM_SPEC_KIND: i64 = 1; // ParamSpec
+const TYPE_VAR_TUPLE_KIND: i64 = 2; // TypeVarTuple
 
 const MIN_SHORT_INT: i64 = -10;
 const MIN_TWO_BYTES_INT: i64 = -100;
@@ -682,6 +688,102 @@ fn serialize_argument(
     ser.write_location(param.range());
 }
 
+fn serialize_type_params(ser: &mut Serializer, type_params: &ast::TypeParams) {
+    // Serialize each type parameter
+    for type_param in &type_params.type_params {
+        match type_param {
+            ast::TypeParam::TypeVar(tv) => {
+                // Type param kind
+                ser.write_tagged_int(TYPE_VAR_KIND);
+
+                // Name
+                ser.write_bytes(tv.name.as_bytes());
+
+                // Check if bound is a tuple (constrained TypeVar)
+                let (has_upper_bound, values) = if let Some(bound) = &tv.bound {
+                    if let ast::Expr::Tuple(tuple_expr) = bound.as_ref() {
+                        // Constrained TypeVar: T: (int, str)
+                        // Values come from the tuple elements
+                        (false, tuple_expr.elts.as_slice())
+                    } else {
+                        // Regular bounded TypeVar: T: str
+                        (true, &[] as &[ast::Expr])
+                    }
+                } else {
+                    (false, &[] as &[ast::Expr])
+                };
+
+                // Upper bound
+                if has_upper_bound {
+                    ser.write_bool(true);
+                    serialize_type(ser, tv.bound.as_ref().unwrap());
+                } else {
+                    ser.write_bool(false);
+                }
+
+                // Values (for constrained TypeVar)
+                ser.write_tag(TAG_LIST_GEN);
+                ser.write_int(values.len() as i64);
+                for value in values {
+                    serialize_type(ser, value);
+                }
+
+                // Default
+                if let Some(default) = &tv.default {
+                    ser.write_bool(true);
+                    serialize_type(ser, default);
+                } else {
+                    ser.write_bool(false);
+                }
+            }
+            ast::TypeParam::ParamSpec(ps) => {
+                // Type param kind
+                ser.write_tagged_int(PARAM_SPEC_KIND);
+
+                // Name
+                ser.write_bytes(ps.name.as_bytes());
+
+                // Upper bound (None for ParamSpec)
+                ser.write_bool(false);
+
+                // Values (empty for ParamSpec)
+                ser.write_tag(TAG_LIST_GEN);
+                ser.write_int(0);
+
+                // Default
+                if let Some(default) = &ps.default {
+                    ser.write_bool(true);
+                    serialize_type(ser, default);
+                } else {
+                    ser.write_bool(false);
+                }
+            }
+            ast::TypeParam::TypeVarTuple(tvt) => {
+                // Type param kind
+                ser.write_tagged_int(TYPE_VAR_TUPLE_KIND);
+
+                // Name
+                ser.write_bytes(tvt.name.as_bytes());
+
+                // Upper bound (None for TypeVarTuple)
+                ser.write_bool(false);
+
+                // Values (empty for TypeVarTuple)
+                ser.write_tag(TAG_LIST_GEN);
+                ser.write_int(0);
+
+                // Default
+                if let Some(default) = &tvt.default {
+                    ser.write_bool(true);
+                    serialize_type(ser, default);
+                } else {
+                    ser.write_bool(false);
+                }
+            }
+        }
+    }
+}
+
 impl Ser for ast::Stmt {
     fn serialize(&self, ser: &mut Serializer) {
         match self {
@@ -744,10 +846,16 @@ impl Ser for ast::Stmt {
 
                 ser.write_bool(f.is_async);
 
-                // TODO: type_params (skip for now)
-                ser.write_bool(false); // No type params
+                // Type parameters
+                if let Some(type_params) = &f.type_params {
+                    ser.write_bool(true);
+                    ser.write_int(type_params.type_params.len() as i64);
+                    serialize_type_params(ser, type_params);
+                } else {
+                    ser.write_bool(false);
+                }
 
-                // TODO: Return type annotation (skip for now)
+                // Return type annotation
                 if let Some(ret) = &f.returns {
                     ser.write_bool(true); // No return annotation
                     serialize_type(ser, ret);
@@ -1061,8 +1169,14 @@ impl Ser for ast::Stmt {
                     dec.expression.serialize(ser);
                 }
 
-                // TODO: Type parameters (skip for now)
-                ser.write_bool(false); // No type params
+                // Type parameters
+                if let Some(type_params) = &c.type_params {
+                    ser.write_bool(true);
+                    ser.write_int(type_params.type_params.len() as i64);
+                    serialize_type_params(ser, type_params);
+                } else {
+                    ser.write_bool(false);
+                }
 
                 // Keywords (all keyword arguments including metaclass)
                 ser.write_tag(TAG_DICT_STR_GEN);
@@ -1227,6 +1341,26 @@ impl Ser for ast::Stmt {
                     ser.serialize_block(&case.body);
                 }
                 ser.write_location(m.range());
+            }
+            ast::Stmt::TypeAlias(ta) => {
+                ser.write_tag(TAG_TYPE_ALIAS_STMT);
+
+                // Name (as NameExpr)
+                ta.name.serialize(ser);
+
+                // Type parameters
+                if let Some(type_params) = &ta.type_params {
+                    ser.write_int(type_params.type_params.len() as i64);
+                    serialize_type_params(ser, type_params);
+                } else {
+                    ser.write_int(0);
+                }
+
+                // Value (the RHS type expression - deserialization will wrap it in LambdaExpr)
+                ta.value.serialize(ser);
+
+                // TypeAliasStmt location
+                ser.write_location(ta.range());
             }
             _ => {
                 panic!("unsupported: {self:?}");
