@@ -165,7 +165,38 @@ pub fn consider_sys_platform(expr: &ast::Expr, platform: &str) -> TruthValue {
 
             TruthValue::TruthValueUnknown
         }
-        // TODO: Implement CallExpr for startswith
+        ast::Expr::Call(call) => {
+            // Check if callee is an attribute expression
+            let ast::Expr::Attribute(attr) = &*call.func else {
+                return TruthValue::TruthValueUnknown;
+            };
+
+            // Check that there's exactly one argument
+            if call.arguments.args.len() != 1 {
+                return TruthValue::TruthValueUnknown;
+            }
+
+            // Check if the attribute base is sys.platform
+            if !is_sys_attr(&attr.value, "platform") {
+                return TruthValue::TruthValueUnknown;
+            }
+
+            // Check if the method is "startswith"
+            if attr.attr.as_str() != "startswith" {
+                return TruthValue::TruthValueUnknown;
+            }
+
+            // Check if the argument is a string literal
+            if let ast::Expr::StringLiteral(string_lit) = &call.arguments.args[0] {
+                if platform.starts_with(string_lit.value.to_str()) {
+                    return TruthValue::AlwaysTrue;
+                } else {
+                    return TruthValue::AlwaysFalse;
+                }
+            }
+
+            TruthValue::TruthValueUnknown
+        }
         _ => TruthValue::TruthValueUnknown,
     }
 }
@@ -420,6 +451,30 @@ mod tests {
         assert_eq!(
             consider_sys_platform(&parse_expr("'a' < sys.platform < 'z'"), "linux"),
             TruthValue::TruthValueUnknown
+        );
+
+        // startswith: platform starts with prefix
+        assert_eq!(
+            consider_sys_platform(&parse_expr("sys.platform.startswith('lin')"), "linux"),
+            TruthValue::AlwaysTrue
+        );
+
+        // startswith: platform doesn't start with prefix
+        assert_eq!(
+            consider_sys_platform(&parse_expr("sys.platform.startswith('win')"), "linux"),
+            TruthValue::AlwaysFalse
+        );
+
+        // startswith: exact match
+        assert_eq!(
+            consider_sys_platform(&parse_expr("sys.platform.startswith('linux')"), "linux"),
+            TruthValue::AlwaysTrue
+        );
+
+        // startswith on win32 platform
+        assert_eq!(
+            consider_sys_platform(&parse_expr("sys.platform.startswith('win')"), "win32"),
+            TruthValue::AlwaysTrue
         );
     }
 
