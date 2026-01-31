@@ -51,6 +51,19 @@ impl TruthValue {
     }
 }
 
+/// Reverse a comparison operator (for swapping operands).
+fn reverse_cmp_op(op: ast::CmpOp) -> ast::CmpOp {
+    match op {
+        ast::CmpOp::Eq => ast::CmpOp::Eq,
+        ast::CmpOp::NotEq => ast::CmpOp::NotEq,
+        ast::CmpOp::Lt => ast::CmpOp::Gt,
+        ast::CmpOp::LtE => ast::CmpOp::GtE,
+        ast::CmpOp::Gt => ast::CmpOp::Lt,
+        ast::CmpOp::GtE => ast::CmpOp::LtE,
+        op => op, // Other operators unchanged
+    }
+}
+
 /// Perform a fixed comparison between two values with a given operator.
 /// Returns AlwaysTrue if the comparison is true, AlwaysFalse if false.
 fn fixed_comparison<T: PartialOrd>(left: T, op: ast::CmpOp, right: T) -> TruthValue {
@@ -230,11 +243,64 @@ fn combine_bool_op(op: ast::BoolOp, values: &[TruthValue]) -> TruthValue {
 }
 
 /// Consider whether expr is a comparison involving sys.version_info.
-pub fn consider_sys_version_info(
-    _expr: &ast::Expr,
-    _python_version: (u32, u32),
-) -> TruthValue {
-    // TODO: Implement sys.version_info inference
+pub fn consider_sys_version_info(expr: &ast::Expr, python_version: (u32, u32)) -> TruthValue {
+    let ast::Expr::Compare(compare) = expr else {
+        return TruthValue::TruthValueUnknown;
+    };
+
+    // Don't support chained comparisons
+    if compare.ops.len() > 1 {
+        return TruthValue::TruthValueUnknown;
+    }
+
+    let mut op = compare.ops[0];
+    // Only support standard comparison operators
+    if !matches!(
+        op,
+        ast::CmpOp::Eq
+            | ast::CmpOp::NotEq
+            | ast::CmpOp::Lt
+            | ast::CmpOp::LtE
+            | ast::CmpOp::Gt
+            | ast::CmpOp::GtE
+    ) {
+        return TruthValue::TruthValueUnknown;
+    }
+
+    // Try to extract sys.version_info pattern from left and int/tuple from right
+    let mut index = contains_sys_version_info(&compare.left);
+    let mut thing = contains_int_or_tuple_of_ints(&compare.comparators[0]);
+
+    // If that didn't work, try the reverse
+    if index.is_none() || thing.is_none() {
+        index = contains_sys_version_info(&compare.comparators[0]);
+        thing = contains_int_or_tuple_of_ints(&compare.left);
+        op = reverse_cmp_op(op);
+    }
+
+    let Some(index) = index else {
+        return TruthValue::TruthValueUnknown;
+    };
+    let Some(thing) = thing else {
+        return TruthValue::TruthValueUnknown;
+    };
+
+    // Handle sys.version_info[i] <compare_op> k
+    if let (SysVersionInfo::Index(idx), IntOrTuple::Int(value)) = (index, thing) {
+        if idx >= 0 && idx <= 1 {
+            let version_component = if idx == 0 {
+                python_version.0 as i32
+            } else {
+                python_version.1 as i32
+            };
+            return fixed_comparison(version_component, op, value);
+        } else {
+            return TruthValue::TruthValueUnknown;
+        }
+    }
+
+    // TODO: Handle tuple comparisons (sys.version_info[lo:hi] <compare_op> tuple)
+
     TruthValue::TruthValueUnknown
 }
 
@@ -497,6 +563,73 @@ mod tests {
         // Not an attribute expression
         assert!(!is_sys_attr(&parse_expr("platform"), "platform"));
         assert!(!is_sys_attr(&parse_expr("sys"), "sys"));
+    }
+
+    #[test]
+    fn test_consider_sys_version_info() {
+        use ruff_python_parser::{Mode, ParseOptions, parse_unchecked};
+
+        let parse_expr = |code: &str| {
+            let parsed = parse_unchecked(code, ParseOptions::from(Mode::Expression));
+            let ast::Mod::Expression(expr_mod) = parsed.into_syntax() else {
+                panic!("Expected expression");
+            };
+            expr_mod.body
+        };
+
+        // Edge case: exact equality
+        assert_eq!(
+            consider_sys_version_info(&parse_expr("sys.version_info[0] == 3"), (3, 10)),
+            TruthValue::AlwaysTrue
+        );
+
+        // Edge case: one off from target
+        assert_eq!(
+            consider_sys_version_info(&parse_expr("sys.version_info[0] == 2"), (3, 10)),
+            TruthValue::AlwaysFalse
+        );
+
+        // Edge case: >= with exact boundary
+        assert_eq!(
+            consider_sys_version_info(&parse_expr("sys.version_info[1] >= 10"), (3, 10)),
+            TruthValue::AlwaysTrue
+        );
+
+        // Edge case: < with exact boundary (should be false)
+        assert_eq!(
+            consider_sys_version_info(&parse_expr("sys.version_info[0] < 3"), (3, 10)),
+            TruthValue::AlwaysFalse
+        );
+
+        // Edge case: reversed operands with exact equality
+        assert_eq!(
+            consider_sys_version_info(&parse_expr("3 == sys.version_info[0]"), (3, 10)),
+            TruthValue::AlwaysTrue
+        );
+
+        // Edge case: reversed > with one above boundary
+        assert_eq!(
+            consider_sys_version_info(&parse_expr("11 > sys.version_info[1]"), (3, 10)),
+            TruthValue::AlwaysTrue
+        );
+
+        // Out of range index (only 0 and 1 supported)
+        assert_eq!(
+            consider_sys_version_info(&parse_expr("sys.version_info[2] == 5"), (3, 10)),
+            TruthValue::TruthValueUnknown
+        );
+
+        // Not a comparison
+        assert_eq!(
+            consider_sys_version_info(&parse_expr("sys.version_info[0]"), (3, 10)),
+            TruthValue::TruthValueUnknown
+        );
+
+        // Chained comparison
+        assert_eq!(
+            consider_sys_version_info(&parse_expr("2 < sys.version_info[0] < 4"), (3, 10)),
+            TruthValue::TruthValueUnknown
+        );
     }
 
     #[test]
