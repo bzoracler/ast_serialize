@@ -179,13 +179,21 @@ fn contains_sys_version_info(expr: &ast::Expr) -> Option<SysVersionInfo> {
 }
 
 /// Check if a name corresponds to a special constant with known truth value.
-fn check_name_truth_value(name: &str, _always_true: &[String], _always_false: &[String]) -> TruthValue {
+fn check_name_truth_value(name: &str, always_true: &[String], always_false: &[String]) -> TruthValue {
     match name {
         "MYPY" | "TYPE_CHECKING" => TruthValue::MypyTrue,
         "PY2" => TruthValue::AlwaysFalse,
         "PY3" => TruthValue::AlwaysTrue,
-        // TODO: Check always_true/always_false lists
-        _ => TruthValue::TruthValueUnknown,
+        _ => {
+            // Check user-provided always_true/always_false lists
+            if always_true.iter().any(|s| s == name) {
+                TruthValue::AlwaysTrue
+            } else if always_false.iter().any(|s| s == name) {
+                TruthValue::AlwaysFalse
+            } else {
+                TruthValue::TruthValueUnknown
+            }
+        }
     }
 }
 
@@ -504,6 +512,49 @@ mod tests {
     #[test]
     fn test_infer_condition_value_placeholder() {
         assert_eq!(infer_expr("foo"), TruthValue::TruthValueUnknown);
+    }
+
+    #[test]
+    fn test_always_true_always_false() {
+        use ruff_python_parser::{Mode, ParseOptions, parse_unchecked};
+
+        let parse_and_infer = |code: &str, always_true: &[String], always_false: &[String]| {
+            let parsed = parse_unchecked(code, ParseOptions::from(Mode::Expression));
+            let ast::Mod::Expression(expr_mod) = parsed.into_syntax() else {
+                panic!("Expected expression");
+            };
+            infer_condition_value(&expr_mod.body, (3, 10), "linux", always_true, always_false)
+        };
+
+        // Name in always_true list
+        assert_eq!(
+            parse_and_infer("DEBUG", &[String::from("DEBUG")], &[]),
+            TruthValue::AlwaysTrue
+        );
+
+        // Name in always_false list
+        assert_eq!(
+            parse_and_infer("PRODUCTION", &[], &[String::from("PRODUCTION")]),
+            TruthValue::AlwaysFalse
+        );
+
+        // Name not in either list
+        assert_eq!(
+            parse_and_infer("UNKNOWN", &[String::from("DEBUG")], &[String::from("PRODUCTION")]),
+            TruthValue::TruthValueUnknown
+        );
+
+        // Built-in names take precedence over always_true/always_false
+        assert_eq!(
+            parse_and_infer("PY3", &[], &[String::from("PY3")]),
+            TruthValue::AlwaysTrue
+        );
+
+        // Attribute expressions also check the lists
+        assert_eq!(
+            parse_and_infer("foo.DEBUG", &[String::from("DEBUG")], &[]),
+            TruthValue::AlwaysTrue
+        );
     }
 
     #[test]
