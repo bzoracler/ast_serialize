@@ -42,6 +42,59 @@ fn check_name_truth_value(name: &str, _always_true: &[String], _always_false: &[
     }
 }
 
+/// Combine truth values using a boolean operator (and/or).
+fn combine_bool_op(op: ast::BoolOp, values: &[TruthValue]) -> TruthValue {
+    // Track what truth values we've seen (efficient single-pass)
+    let mut has_always_true = false;
+    let mut has_mypy_true = false;
+    let mut has_always_false = false;
+    let mut has_mypy_false = false;
+    let mut has_unknown = false;
+
+    for &val in values {
+        match val {
+            TruthValue::AlwaysTrue => has_always_true = true,
+            TruthValue::MypyTrue => has_mypy_true = true,
+            TruthValue::AlwaysFalse => has_always_false = true,
+            TruthValue::MypyFalse => has_mypy_false = true,
+            TruthValue::TruthValueUnknown => has_unknown = true,
+        }
+    }
+
+    match op {
+        ast::BoolOp::Or => {
+            if has_always_true {
+                TruthValue::AlwaysTrue
+            } else if has_mypy_true {
+                TruthValue::MypyTrue
+            } else if !has_always_false && !has_unknown && has_mypy_false {
+                // All values are MYPY_FALSE
+                TruthValue::MypyFalse
+            } else if !has_unknown && !has_always_true && !has_mypy_true {
+                // All values are ALWAYS_FALSE or MYPY_FALSE
+                TruthValue::AlwaysFalse
+            } else {
+                TruthValue::TruthValueUnknown
+            }
+        }
+        ast::BoolOp::And => {
+            if has_always_false {
+                TruthValue::AlwaysFalse
+            } else if has_mypy_false {
+                TruthValue::MypyFalse
+            } else if !has_mypy_true && !has_unknown && has_always_true {
+                // All values are ALWAYS_TRUE
+                TruthValue::AlwaysTrue
+            } else if !has_unknown && !has_always_false && !has_mypy_false {
+                // All values are ALWAYS_TRUE or MYPY_TRUE
+                TruthValue::MypyTrue
+            } else {
+                TruthValue::TruthValueUnknown
+            }
+        }
+    }
+}
+
 /// Consider whether expr is a comparison involving sys.version_info.
 pub fn consider_sys_version_info(
     _expr: &ast::Expr,
@@ -86,16 +139,19 @@ pub fn infer_condition_value(
 
         // Handle boolean operations (and/or)
         ast::Expr::BoolOp(bool_op) => {
-            match bool_op.op {
-                ast::BoolOp::And => {
-                    // TODO: Implement and logic
-                    TruthValue::TruthValueUnknown
-                }
-                ast::BoolOp::Or => {
-                    // TODO: Implement or logic
-                    TruthValue::TruthValueUnknown
-                }
+            // Infer truth values for all operands
+            let mut inferred_values = Vec::with_capacity(bool_op.values.len());
+            for value in &bool_op.values {
+                inferred_values.push(infer_condition_value(
+                    value,
+                    python_version,
+                    platform,
+                    always_true,
+                    always_false,
+                ));
             }
+
+            combine_bool_op(bool_op.op, &inferred_values)
         }
 
         // Fallback: try sys.version_info and sys.platform checks
@@ -180,5 +236,46 @@ mod tests {
         assert_eq!(infer_expr("bar.PY2"), TruthValue::AlwaysFalse);
         assert_eq!(infer_expr("baz.PY3"), TruthValue::AlwaysTrue);
         assert_eq!(infer_expr("sys.platform"), TruthValue::TruthValueUnknown);
+    }
+
+    #[test]
+    fn test_or_operation() {
+        // ALWAYS_TRUE wins
+        assert_eq!(infer_expr("PY3 or foo"), TruthValue::AlwaysTrue);
+        assert_eq!(infer_expr("foo or PY3"), TruthValue::AlwaysTrue);
+
+        // MYPY_TRUE wins if no ALWAYS_TRUE
+        assert_eq!(infer_expr("MYPY or PY2"), TruthValue::MypyTrue);
+        assert_eq!(infer_expr("PY2 or MYPY"), TruthValue::MypyTrue);
+
+        // All MYPY_FALSE -> MYPY_FALSE
+        assert_eq!(infer_expr("(not MYPY) or (not TYPE_CHECKING)"), TruthValue::MypyFalse);
+
+        // All ALWAYS_FALSE or MYPY_FALSE -> ALWAYS_FALSE
+        assert_eq!(infer_expr("PY2 or (not MYPY)"), TruthValue::AlwaysFalse);
+
+        // Mixed with unknown -> unknown
+        assert_eq!(infer_expr("foo or bar"), TruthValue::TruthValueUnknown);
+    }
+
+    #[test]
+    fn test_and_operation() {
+        // ALWAYS_FALSE wins
+        assert_eq!(infer_expr("PY2 and foo"), TruthValue::AlwaysFalse);
+        assert_eq!(infer_expr("foo and PY2"), TruthValue::AlwaysFalse);
+
+        // MYPY_FALSE wins if no ALWAYS_FALSE
+        assert_eq!(infer_expr("(not MYPY) and PY3"), TruthValue::MypyFalse);
+        assert_eq!(infer_expr("PY3 and (not MYPY)"), TruthValue::MypyFalse);
+
+        // All ALWAYS_TRUE -> ALWAYS_TRUE
+        assert_eq!(infer_expr("PY3 and PY3"), TruthValue::AlwaysTrue);
+
+        // All ALWAYS_TRUE or MYPY_TRUE -> MYPY_TRUE
+        assert_eq!(infer_expr("PY3 and MYPY"), TruthValue::MypyTrue);
+        assert_eq!(infer_expr("MYPY and TYPE_CHECKING"), TruthValue::MypyTrue);
+
+        // Mixed with unknown -> unknown
+        assert_eq!(infer_expr("foo and bar"), TruthValue::TruthValueUnknown);
     }
 }
