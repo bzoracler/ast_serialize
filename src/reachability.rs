@@ -31,6 +31,19 @@ impl TruthValue {
     }
 }
 
+/// Check if an expression is an attribute access on 'sys' with the given name.
+/// For example, `is_sys_attr(expr, "platform")` returns true for `sys.platform`.
+fn is_sys_attr(expr: &ast::Expr, name: &str) -> bool {
+    if let ast::Expr::Attribute(attr) = expr {
+        if attr.attr.as_str() == name {
+            if let ast::Expr::Name(base_name) = &*attr.value {
+                return base_name.id.as_str() == "sys";
+            }
+        }
+    }
+    false
+}
+
 /// Check if a name corresponds to a special constant with known truth value.
 fn check_name_truth_value(name: &str, _always_true: &[String], _always_false: &[String]) -> TruthValue {
     match name {
