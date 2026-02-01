@@ -1287,6 +1287,9 @@ impl Ser for ast::Stmt {
                     ser.write_bool(false);
                 }
 
+                // Serialize is_star flag (for except* in Python 3.11+)
+                ser.write_bool(t.is_star);
+
                 ser.write_location(t.range());
             }
             ast::Stmt::Delete(d) => {
