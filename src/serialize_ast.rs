@@ -2014,6 +2014,8 @@ fn serialize_type(ser: &mut Serializer, t: &ast::Expr) {
         ast::Expr::Starred(e) => {
             ser.write_tag(TAG_UNPACK_TYPE);
             serialize_type(ser, &e.value);
+            // Write from_star_syntax flag (true for * syntax, false for Unpack[...])
+            ser.write_bool(true);
         }
         ast::Expr::UnaryOp(e) => {
             // Handle unary operators on integer literals in types
