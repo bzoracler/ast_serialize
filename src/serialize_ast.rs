@@ -206,6 +206,7 @@ pub(crate) fn serialize_python_file(
         text: &source_text,
         skip_function_bodies,
         in_class: false,
+        in_function: false,
         is_all_ascii,
         lines_with_non_ascii,
         type_comments,
@@ -222,12 +223,14 @@ enum ImportStatement {
         relative: i32,           // Number of dots in relative import 'import ..x'
         as_name: Option<String>, // Set for 'import x as y'
         range: TextRange,        // Source range of the import alias
+        is_top_level: bool,      // true if import is not within a function
     },
     ImportFrom {
         module: String, // Module being imported from (empty string for "from . import x")
         relative: i32,  // Number of dots in relative import
         names: Vec<(String, Option<String>)>, // List of (name, as_name) tuples
         range: TextRange, // Source range of the entire import statement
+        is_top_level: bool, // true if import is not within a function
     },
 }
 
@@ -238,6 +241,7 @@ struct Serializer<'a> {
     text: &'a str,
     skip_function_bodies: bool, // Whether to omit function bodies without visible effects
     in_class: bool,             // Whether we're currently inside a class definition
+    in_function: bool,          // Whether we're currently inside a function definition
     is_all_ascii: bool,         // Whether the entire file contains only ASCII characters
     lines_with_non_ascii: Vec<bool>, // Per-line flags: true if line has non-ASCII (empty if is_all_ascii)
     type_comments: HashMap<usize, ast::Expr>, // Type comments by line number (1-indexed)
@@ -826,6 +830,10 @@ impl Ser for ast::Stmt {
                     true
                 };
 
+                // Body - mark that we're inside a function
+                let was_in_function = ser.in_function;
+                ser.in_function = true;
+
                 if should_serialize_body {
                     if f.body.is_empty() {
                         // Empty body due to syntax error - use serialize_empty_block
@@ -843,6 +851,8 @@ impl Ser for ast::Stmt {
                     };
                     ser.serialize_empty_block(body_range);
                 }
+
+                ser.in_function = was_in_function;
 
                 ser.write_bool(f.is_async);
 
@@ -976,6 +986,7 @@ impl Ser for ast::Stmt {
                         relative: 0, // Not a relative import
                         as_name: name.asname.as_ref().map(|n| n.to_string()),
                         range: name.range,
+                        is_top_level: !ser.in_function,
                     });
                 }
                 ser.write_location(i.range());
@@ -1035,6 +1046,7 @@ impl Ser for ast::Stmt {
                         relative: ifrom.level as i32,
                         names,
                         range: ifrom.range(),
+                        is_top_level: !ser.in_function,
                     });
 
                     ser.write_location(ifrom.range());
@@ -2344,6 +2356,7 @@ mod tests {
             text,
             skip_function_bodies: false,
             in_class: false,
+            in_function: false,
             is_all_ascii,
             lines_with_non_ascii,
             type_comments: HashMap::new(),
