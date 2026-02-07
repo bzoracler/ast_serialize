@@ -224,6 +224,8 @@ enum ImportStatement {
         as_name: Option<String>, // Set for 'import x as y'
         range: TextRange,        // Source range of the import alias
         is_top_level: bool,      // true if import is not within a function
+        is_unreachable: bool,    // true if import is in unreachable code
+        is_mypy_only: bool,      // true if import is mypy-only (e.g., in TYPE_CHECKING block)
     },
     ImportFrom {
         module: String, // Module being imported from (empty string for "from . import x")
@@ -231,6 +233,8 @@ enum ImportStatement {
         names: Vec<(String, Option<String>)>, // List of (name, as_name) tuples
         range: TextRange, // Source range of the entire import statement
         is_top_level: bool, // true if import is not within a function
+        is_unreachable: bool, // true if import is in unreachable code
+        is_mypy_only: bool, // true if import is mypy-only (e.g., in TYPE_CHECKING block)
     },
 }
 
@@ -987,6 +991,8 @@ impl Ser for ast::Stmt {
                         as_name: name.asname.as_ref().map(|n| n.to_string()),
                         range: name.range,
                         is_top_level: !ser.in_function,
+                        is_unreachable: false,
+                        is_mypy_only: false,
                     });
                 }
                 ser.write_location(i.range());
@@ -1047,6 +1053,8 @@ impl Ser for ast::Stmt {
                         names,
                         range: ifrom.range(),
                         is_top_level: !ser.in_function,
+                        is_unreachable: false,
+                        is_mypy_only: false,
                     });
 
                     ser.write_location(ifrom.range());
