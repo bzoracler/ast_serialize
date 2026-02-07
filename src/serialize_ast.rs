@@ -202,7 +202,6 @@ pub(crate) fn serialize_python_file(
     let mut ser = Serializer {
         bytes: Vec::new(),
         imports: Vec::new(),
-        import_froms: Vec::new(),
         line_index,
         text: &source_text,
         skip_function_bodies,
@@ -217,23 +216,22 @@ pub(crate) fn serialize_python_file(
 }
 
 // Used to report which imports are used in a file
-struct Import {
-    name: String,
-    relative: i32,           // Number of dots in relative import 'import ..x'
-    as_name: Option<String>, // Set for 'import x as y'
-}
-
-// Used to report which from...import statements are used in a file
-struct ImportFrom {
-    module: String, // Module being imported from (empty string for "from . import x")
-    relative: i32,  // Number of dots in relative import
-    names: Vec<(String, Option<String>)>, // List of (name, as_name) tuples
+enum ImportStatement {
+    Import {
+        name: String,
+        relative: i32,           // Number of dots in relative import 'import ..x'
+        as_name: Option<String>, // Set for 'import x as y'
+    },
+    ImportFrom {
+        module: String, // Module being imported from (empty string for "from . import x")
+        relative: i32,  // Number of dots in relative import
+        names: Vec<(String, Option<String>)>, // List of (name, as_name) tuples
+    },
 }
 
 struct Serializer<'a> {
     bytes: Vec<u8>,
-    imports: Vec<Import>,          // Encountered import statements
-    import_froms: Vec<ImportFrom>, // Encountered from...import statements
+    imports: Vec<ImportStatement>, // Encountered import statements
     line_index: LineIndex,
     text: &'a str,
     skip_function_bodies: bool, // Whether to omit function bodies without visible effects
@@ -971,7 +969,7 @@ impl Ser for ast::Stmt {
                     } else {
                         ser.write_bool(false);
                     }
-                    ser.imports.push(Import {
+                    ser.imports.push(ImportStatement::Import {
                         name: name.name.to_string(),
                         relative: 0, // Not a relative import
                         as_name: name.asname.as_ref().map(|n| n.to_string()),
@@ -1025,8 +1023,8 @@ impl Ser for ast::Stmt {
                         ));
                     }
 
-                    // Track in import_froms list for dependency tracking
-                    ser.import_froms.push(ImportFrom {
+                    // Track in imports list for dependency tracking
+                    ser.imports.push(ImportStatement::ImportFrom {
                         module: ifrom
                             .module
                             .as_ref()
@@ -2338,7 +2336,6 @@ mod tests {
         Serializer {
             bytes: Vec::new(),
             imports: Vec::new(),
-            import_froms: Vec::new(),
             line_index: index,
             text,
             skip_function_bodies: false,
