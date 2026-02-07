@@ -221,11 +221,13 @@ enum ImportStatement {
         name: String,
         relative: i32,           // Number of dots in relative import 'import ..x'
         as_name: Option<String>, // Set for 'import x as y'
+        range: TextRange,        // Source range of the import alias
     },
     ImportFrom {
         module: String, // Module being imported from (empty string for "from . import x")
         relative: i32,  // Number of dots in relative import
         names: Vec<(String, Option<String>)>, // List of (name, as_name) tuples
+        range: TextRange, // Source range of the entire import statement
     },
 }
 
@@ -973,6 +975,7 @@ impl Ser for ast::Stmt {
                         name: name.name.to_string(),
                         relative: 0, // Not a relative import
                         as_name: name.asname.as_ref().map(|n| n.to_string()),
+                        range: name.range,
                     });
                 }
                 ser.write_location(i.range());
@@ -1031,6 +1034,7 @@ impl Ser for ast::Stmt {
                             .map_or(String::new(), |m| m.to_string()),
                         relative: ifrom.level as i32,
                         names,
+                        range: ifrom.range(),
                     });
 
                     ser.write_location(ifrom.range());
