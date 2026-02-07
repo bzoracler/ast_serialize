@@ -3,6 +3,7 @@ use pyo3::types::{PyDict, PyTuple};
 use std::path::Path;
 
 mod func_effect_visitor;
+mod options;
 pub mod reachability;
 mod serialize_ast;
 pub mod type_comment;
@@ -69,7 +70,7 @@ fn parse(
         serialize_ast::serialize_python_file(
             path,
             skip_function_bodies,
-            serialize_ast::Options::new(python_version, platform, always_true, always_false),
+            options::Options::new(python_version, platform, always_true, always_false),
         )
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
 

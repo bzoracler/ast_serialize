@@ -1,5 +1,5 @@
+use crate::options::Options;
 use ruff_python_ast as ast;
-use crate::serialize_ast::Options;
 
 /// Inferred truth value of an expression during reachability analysis.
 ///
