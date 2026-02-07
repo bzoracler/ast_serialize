@@ -151,10 +151,7 @@ const LONG_INT_TRAILER: u8 = 15;
 /// * `file_path` - Path to the Python file to parse and serialize
 /// * `skip_function_bodies` - If true, omit function bodies unless they have externally visible effects
 ///   (for methods in classes only; module-level functions always have bodies omitted when this is true)
-/// * `python_version` - Python version as (major, minor) tuple for reachability analysis
-/// * `platform` - Platform string for reachability analysis
-/// * `always_true` - Names that are always considered true for reachability analysis
-/// * `always_false` - Names that are always considered false for reachability analysis
+/// * `options` - Reachability analysis options (python version, platform and always-true/-false names)
 ///
 /// # Returns
 ///
@@ -169,10 +166,7 @@ const LONG_INT_TRAILER: u8 = 15;
 pub(crate) fn serialize_python_file(
     file_path: &Path,
     skip_function_bodies: bool,
-    python_version: (u32, u32),
-    platform: String,
-    always_true: Vec<String>,
-    always_false: Vec<String>,
+    options: Options,
 ) -> Result<(Vec<u8>, Vec<SyntaxError>, Vec<(usize, Vec<String>)>, Vec<u8>)> {
     let source_type = PySourceType::from(file_path);
     let source_text = std::fs::read_to_string(file_path)?;
@@ -220,10 +214,7 @@ pub(crate) fn serialize_python_file(
         is_all_ascii,
         lines_with_non_ascii,
         type_comments,
-        python_version,
-        platform,
-        always_true,
-        always_false,
+        options,
         current_unreachable: false,
         current_mypy_only: false,
     };
@@ -263,6 +254,56 @@ enum ImportStatement {
     },
 }
 
+pub(crate) struct Options {
+    python_version: (u32, u32),
+    platform: String,
+    always_true: Vec<String>,
+    always_false: Vec<String>,
+}
+
+impl Default for Options {
+    fn default() -> Self {
+        Self {
+            python_version: (3, 12),
+            platform: String::from("linux"),
+            always_true: Vec::new(),
+            always_false: Vec::new(),
+        }
+    }
+}
+
+impl Options {
+    pub(crate) fn new(
+        python_version: (u32, u32),
+        platform: String,
+        always_true: Vec<String>,
+        always_false: Vec<String>,
+    ) -> Self {
+        Self {
+            python_version,
+            platform,
+            always_true,
+            always_false,
+        }
+    }
+
+    pub(crate) fn python_version(&self) -> (u32, u32) {
+        self.python_version
+    }
+
+    pub(crate) fn platform(&self) -> &str {
+        &self.platform
+    }
+
+    pub(crate) fn always_true(&self) -> &[String] {
+        &self.always_true
+    }
+
+    pub(crate) fn always_false(&self) -> &[String] {
+        &self.always_false
+    }
+}
+
 struct Serializer<'a> {
     bytes: Vec<u8>,
     imports: Vec<ImportStatement>, // Encountered import statements
@@ -274,10 +315,7 @@ struct Serializer<'a> {
     is_all_ascii: bool,         // Whether the entire file contains only ASCII characters
     lines_with_non_ascii: Vec<bool>, // Per-line flags: true if line has non-ASCII (empty if is_all_ascii)
     type_comments: HashMap<usize, ast::Expr>, // Type comments by line number (1-indexed)
-    python_version: (u32, u32), // Python version for reachability analysis
-    platform: String,           // Platform for reachability analysis
-    always_true: Vec<String>,   // Names always considered true
-    always_false: Vec<String>,  // Names always considered false
+    options: Options,           // Reachability analysis options
     current_unreachable: bool,  // Whether we're currently in an unreachable block
     current_mypy_only: bool,    // Whether we're currently in a mypy-only block (e.g., if TYPE_CHECKING)
 }
@@ -1121,10 +1159,7 @@ impl Ser for ast::Stmt {
                 // Analyze main if condition for reachability
                 let main_truth = crate::reachability::infer_condition_value(
                     &s.test,
-                    ser.python_version,
-                    &ser.platform,
-                    &ser.always_true,
-                    &ser.always_false,
+                    &ser.options,
                 );
 
                 // Main body unreachable if condition is always/mypy false
@@ -1181,10 +1216,7 @@ impl Ser for ast::Stmt {
                             e.serialize(ser);
                             let elif_truth = crate::reachability::infer_condition_value(
                                 e,
-                                ser.python_version,
-                                &ser.platform,
-                                &ser.always_true,
-                                &ser.always_false,
+                                &ser.options,
                             );
 
                             // Unreachable if: prior condition was always true OR this condition is always/mypy false
@@ -2538,10 +2570,7 @@ pub fn serialize_imports(
         is_all_ascii,
         lines_with_non_ascii,
         type_comments: HashMap::new(),
-        python_version: (3, 12), // Default version for serializing imports
-        platform: String::from("linux"), // Default platform
-        always_true: Vec::new(),
-        always_false: Vec::new(),
+        options: Options::default(),
         current_unreachable: false,
         current_mypy_only: false,
     };
@@ -2639,10 +2668,7 @@ mod tests {
             is_all_ascii,
             lines_with_non_ascii,
             type_comments: HashMap::new(),
-            python_version: (3, 12), // Test default
-            platform: String::from("linux"), // Test default
-            always_true: Vec::new(),
-            always_false: Vec::new(),
+            options: Options::default(),
             current_unreachable: false,
             current_mypy_only: false,
         }

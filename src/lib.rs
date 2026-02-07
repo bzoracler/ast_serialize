@@ -69,10 +69,7 @@ fn parse(
         serialize_ast::serialize_python_file(
             path,
             skip_function_bodies,
-            python_version,
-            platform,
-            always_true,
-            always_false,
+            serialize_ast::Options::new(python_version, platform, always_true, always_false),
         )
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
 
