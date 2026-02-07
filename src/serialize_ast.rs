@@ -204,24 +204,24 @@ pub(crate) fn serialize_python_file(
     let mut ser = Serializer {
         bytes: Vec::new(),
         imports: Vec::new(),
-        line_index: line_index.clone(),
+        line_index,
         text: &source_text,
         skip_function_bodies,
         in_class: false,
         in_function: false,
         is_all_ascii,
-        lines_with_non_ascii: lines_with_non_ascii.clone(),
+        lines_with_non_ascii,
         type_comments,
     };
     parsed.syntax().serialize(&mut ser);
 
-    // Serialize the collected imports, reusing the computed ASCII state
+    // Serialize the collected imports, reusing the moved state from serializer
     let import_bytes = serialize_imports(
         &ser.imports,
         &source_text,
-        Some(line_index),
+        Some(ser.line_index),
         Some(is_all_ascii),
-        Some(lines_with_non_ascii),
+        Some(ser.lines_with_non_ascii),
     );
 
     Ok((ser.bytes, syntax_errors, type_ignore_lines, import_bytes))
