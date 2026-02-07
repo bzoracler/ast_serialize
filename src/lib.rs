@@ -20,6 +20,7 @@ pub mod type_comment;
 /// - bytes: The serialized AST in mypy's format (may be partial if there are syntax errors)
 /// - list: A list of syntax errors, where each error is a dict with 'line', 'column', and 'message'
 /// - list[tuple[int, list[str]]]: A list of tuples (line_number, error_codes) for `type: ignore` comments
+/// - bytes: The serialized imports metadata
 ///
 /// # Errors
 ///
@@ -30,9 +31,9 @@ fn parse(
     py: Python,
     fnam: String,
     skip_function_bodies: bool,
-) -> PyResult<(Vec<u8>, Vec<PyObject>, Vec<PyObject>)> {
+) -> PyResult<(Vec<u8>, Vec<PyObject>, Vec<PyObject>, Vec<u8>)> {
     let path = Path::new(&fnam);
-    let (ast_bytes, syntax_errors, type_ignore_lines) =
+    let (ast_bytes, syntax_errors, type_ignore_lines, import_bytes) =
         serialize_ast::serialize_python_file(path, skip_function_bodies)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
 
@@ -64,7 +65,7 @@ fn parse(
         })
         .collect();
 
-    Ok((ast_bytes, py_errors, py_type_ignores))
+    Ok((ast_bytes, py_errors, py_type_ignores, import_bytes))
 }
 
 /// A Python module for parsing Python files and serializing to mypy AST format

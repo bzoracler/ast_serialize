@@ -165,7 +165,7 @@ const LONG_INT_TRAILER: u8 = 15;
 pub(crate) fn serialize_python_file(
     file_path: &Path,
     skip_function_bodies: bool,
-) -> Result<(Vec<u8>, Vec<SyntaxError>, Vec<(usize, Vec<String>)>)> {
+) -> Result<(Vec<u8>, Vec<SyntaxError>, Vec<(usize, Vec<String>)>, Vec<u8>)> {
     let source_type = PySourceType::from(file_path);
     let source_text = std::fs::read_to_string(file_path)?;
     let line_index = LineIndex::from_source_text(&source_text);
@@ -204,18 +204,27 @@ pub(crate) fn serialize_python_file(
     let mut ser = Serializer {
         bytes: Vec::new(),
         imports: Vec::new(),
-        line_index,
+        line_index: line_index.clone(),
         text: &source_text,
         skip_function_bodies,
         in_class: false,
         in_function: false,
         is_all_ascii,
-        lines_with_non_ascii,
+        lines_with_non_ascii: lines_with_non_ascii.clone(),
         type_comments,
     };
     parsed.syntax().serialize(&mut ser);
 
-    Ok((ser.bytes, syntax_errors, type_ignore_lines))
+    // Serialize the collected imports, reusing the computed ASCII state
+    let import_bytes = serialize_imports(
+        &ser.imports,
+        &source_text,
+        Some(line_index),
+        Some(is_all_ascii),
+        Some(lines_with_non_ascii),
+    );
+
+    Ok((ser.bytes, syntax_errors, type_ignore_lines, import_bytes))
 }
 
 // Used to report which imports are used in a file
