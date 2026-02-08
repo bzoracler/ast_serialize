@@ -49,18 +49,15 @@ fn parse(
     always_false: Option<Vec<String>>,
 ) -> PyResult<(Vec<u8>, Vec<PyObject>, Vec<PyObject>, Vec<u8>)> {
     // Get defaults from Python if not provided
-    let python_version = python_version.unwrap_or_else(|| {
-        let sys = py.import("sys").unwrap();
-        let version_info = sys.getattr("version_info").unwrap();
-        let major: u32 = version_info.get_item(0).unwrap().extract().unwrap();
-        let minor: u32 = version_info.get_item(1).unwrap().extract().unwrap();
-        (major, minor)
-    });
+    let python_version = match python_version {
+        Some(v) => v,
+        None => get_default_python_version(py)?,
+    };
 
-    let platform = platform.unwrap_or_else(|| {
-        let sys = py.import("sys").unwrap();
-        sys.getattr("platform").unwrap().extract().unwrap()
-    });
+    let platform = match platform {
+        Some(p) => p,
+        None => get_default_platform(py)?,
+    };
 
     let always_true = always_true.unwrap_or_default();
     let always_false = always_false.unwrap_or_default();
@@ -75,34 +72,50 @@ fn parse(
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
 
     // Convert syntax errors to Python dicts
-    let py_errors: Vec<PyObject> = syntax_errors
+    let py_errors: PyResult<Vec<PyObject>> = syntax_errors
         .iter()
         .map(|error| {
             let dict = PyDict::new(py);
-            dict.set_item("line", error.line).unwrap();
-            dict.set_item("column", error.column).unwrap();
-            dict.set_item("message", error.message.clone()).unwrap();
-            dict.into()
+            dict.set_item("line", error.line)?;
+            dict.set_item("column", error.column)?;
+            dict.set_item("message", error.message.clone())?;
+            Ok(dict.into())
         })
         .collect();
+    let py_errors = py_errors?;
 
     // Convert type ignore lines to Python tuples (line, error_codes)
-    let py_type_ignores: Vec<PyObject> = type_ignore_lines
+    let py_type_ignores: PyResult<Vec<PyObject>> = type_ignore_lines
         .iter()
         .map(|(line, error_codes)| {
-            PyTuple::new(
+            let tuple = PyTuple::new(
                 py,
                 [
-                    line.into_pyobject(py).unwrap().into_any(),
-                    error_codes.into_pyobject(py).unwrap().into_any(),
+                    line.into_pyobject(py)?.into_any(),
+                    error_codes.into_pyobject(py)?.into_any(),
                 ],
-            )
-            .unwrap()
-            .into()
+            )?;
+            Ok(tuple.into())
         })
         .collect();
+    let py_type_ignores = py_type_ignores?;
 
     Ok((ast_bytes, py_errors, py_type_ignores, import_bytes))
+}
+
+/// Get the default Python version from sys.version_info
+fn get_default_python_version(py: Python) -> PyResult<(u32, u32)> {
+    let sys = py.import("sys")?;
+    let version_info = sys.getattr("version_info")?;
+    let major: u32 = version_info.get_item(0)?.extract()?;
+    let minor: u32 = version_info.get_item(1)?.extract()?;
+    Ok((major, minor))
+}
+
+/// Get the default platform from sys.platform
+fn get_default_platform(py: Python) -> PyResult<String> {
+    let sys = py.import("sys")?;
+    sys.getattr("platform")?.extract()
 }
 
 /// A Python module for parsing Python files and serializing to mypy AST format
