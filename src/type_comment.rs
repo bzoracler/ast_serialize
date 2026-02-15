@@ -1,16 +1,15 @@
 //! Parse type comments from Python source code
 
-/// Result of parsing a type comment
+/// Individual type comment found in a comment line
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum TypeCommentKind {
-    /// A type: ignore comment with optional error codes
+pub enum TypeComment {
+    /// A type: ignore with optional error codes
     Ignore(Vec<String>),
-    /// A type annotation comment (e.g., `# type: list[int]`)
-    /// Returns the type annotation string (without `# type:` prefix)
+    /// A type annotation (e.g., `list[int]`)
     TypeAnnotation(String),
 }
 
-/// Parse a type comment and determine if it's a type: ignore or type annotation.
+/// Parse a type comment and extract all parts (type annotation and/or type: ignore).
 ///
 /// # Arguments
 ///
@@ -18,20 +17,25 @@ pub enum TypeCommentKind {
 ///
 /// # Returns
 ///
-/// - `Some(TypeCommentKind::Ignore(codes))` if it's a type: ignore comment
-/// - `Some(TypeCommentKind::TypeAnnotation(annotation))` if it's a type annotation
+/// - `Some(Vec<TypeComment>)` with one or more parts if valid type comment(s) found
 /// - `None` if it's not a type comment
 ///
 /// # Examples
 ///
 /// ```
-/// use mypy_parser::type_comment::{parse_type_comment_kind, TypeCommentKind};
+/// use mypy_parser::type_comment::{parse_type_comments, TypeComment};
 ///
-/// assert_eq!(parse_type_comment_kind("# type: ignore"), Some(TypeCommentKind::Ignore(vec![])));
-/// assert_eq!(parse_type_comment_kind("# type: int"), Some(TypeCommentKind::TypeAnnotation("int".to_string())));
-/// assert_eq!(parse_type_comment_kind("# type: list[int]  # comment"), Some(TypeCommentKind::TypeAnnotation("list[int]".to_string())));
+/// // Pure type: ignore
+/// let result = parse_type_comments("# type: ignore").unwrap();
+/// assert_eq!(result.len(), 1);
+///
+/// // Type annotation with type: ignore on same line
+/// let result = parse_type_comments("# type: int  # type: ignore[arg-type]").unwrap();
+/// assert_eq!(result.len(), 2);  // Both annotation and ignore
 /// ```
-pub fn parse_type_comment_kind(comment: &str) -> Option<TypeCommentKind> {
+pub fn parse_type_comments(comment: &str) -> Option<Vec<TypeComment>> {
+    let mut parts = Vec::new();
+
     // Remove leading '#' and whitespace
     let trimmed = comment.trim_start_matches('#').trim_start();
 
@@ -43,7 +47,7 @@ pub fn parse_type_comment_kind(comment: &str) -> Option<TypeCommentKind> {
     // Get the part after "type:"
     let after_type = trimmed["type:".len()..].trim_start();
 
-    // Check if it's a type: ignore comment
+    // Check if it's a type: ignore comment (without type annotation)
     if after_type.starts_with("ignore") {
         // Check if "ignore" is followed by whitespace, '[', or end of string
         let after_ignore = &after_type["ignore".len()..];
@@ -73,33 +77,51 @@ pub fn parse_type_comment_kind(comment: &str) -> Option<TypeCommentKind> {
                         .filter(|s| !s.is_empty())
                         .collect();
 
-                    return Some(TypeCommentKind::Ignore(error_codes));
+                    parts.push(TypeComment::Ignore(error_codes));
+                    return Some(parts);
                 }
             }
 
             // No error codes specified (just "# type: ignore")
-            return Some(TypeCommentKind::Ignore(Vec::new()));
+            parts.push(TypeComment::Ignore(Vec::new()));
+            return Some(parts);
         }
     }
 
-    // Not a type: ignore, so treat as type annotation
-    // Extract the type annotation, stopping at the next '#' (which could be a regular comment or type: ignore)
-    let type_annotation = if let Some(hash_pos) = after_type.find('#') {
+    // Parse type annotation, stopping at the next '#'
+    let (type_annotation, remainder) = if let Some(hash_pos) = after_type.find('#') {
         // There's another comment after the type annotation
-        after_type[..hash_pos].trim_end()
+        (after_type[..hash_pos].trim_end(), Some(&after_type[hash_pos..]))
     } else {
         // No trailing comment
-        after_type.trim_end()
+        (after_type.trim_end(), None)
     };
 
-    if type_annotation.is_empty() {
-        return None;
+    if !type_annotation.is_empty() {
+        parts.push(TypeComment::TypeAnnotation(type_annotation.to_string()));
     }
 
-    Some(TypeCommentKind::TypeAnnotation(type_annotation.to_string()))
+    // Check if there's a "# type: ignore" in the remainder
+    if let Some(remainder_str) = remainder {
+        // Recursively parse the remainder to check for type: ignore
+        if let Some(remainder_parts) = parse_type_comments(remainder_str) {
+            // Add any ignore parts found
+            for part in remainder_parts {
+                if matches!(part, TypeComment::Ignore(_)) {
+                    parts.push(part);
+                }
+            }
+        }
+    }
+
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts)
+    }
 }
 
-/// Parse a type comment and extract error codes if it's a type ignore comment.
+/// Parse a type comment and extract error codes if it contains a type ignore comment.
 ///
 /// # Arguments
 ///
@@ -107,8 +129,8 @@ pub fn parse_type_comment_kind(comment: &str) -> Option<TypeCommentKind> {
 ///
 /// # Returns
 ///
-/// `Some(Vec<String>)` containing error codes if it's a type ignore comment,
-/// `None` if it's not a type ignore comment.
+/// `Some(Vec<String>)` containing error codes if it contains a type ignore comment,
+/// `None` if it doesn't contain a type ignore comment.
 /// Error codes are parsed from brackets like `[code1, code2]`.
 /// Only whitespace is allowed between 'ignore' and '['.
 ///
@@ -119,15 +141,18 @@ pub fn parse_type_comment_kind(comment: &str) -> Option<TypeCommentKind> {
 ///
 /// assert_eq!(parse_type_comment("# type: ignore"), Some(vec![]));
 /// assert_eq!(parse_type_comment("# type: ignore[arg-type]"), Some(vec!["arg-type".to_string()]));
-/// assert_eq!(parse_type_comment("# type: ignore [override]"), Some(vec!["override".to_string()]));
-/// assert_eq!(parse_type_comment("# type: ignore[arg-type, override]"), Some(vec!["arg-type".to_string(), "override".to_string()]));
+/// assert_eq!(parse_type_comment("# type: int  # type: ignore[override]"), Some(vec!["override".to_string()]));
 /// assert_eq!(parse_type_comment("# regular comment"), None);
 /// ```
 pub fn parse_type_comment(comment: &str) -> Option<Vec<String>> {
-    match parse_type_comment_kind(comment) {
-        Some(TypeCommentKind::Ignore(codes)) => Some(codes),
-        _ => None,
+    let parts = parse_type_comments(comment)?;
+    // Find the first Ignore part
+    for part in parts {
+        if let TypeComment::Ignore(codes) = part {
+            return Some(codes);
+        }
     }
+    None
 }
 
 #[cfg(test)]
@@ -210,75 +235,70 @@ mod tests {
 
     #[test]
     fn test_type_comment_kind_ignore() {
-        assert_eq!(
-            parse_type_comment_kind("# type: ignore"),
-            Some(TypeCommentKind::Ignore(vec![]))
-        );
-        assert_eq!(
-            parse_type_comment_kind("# type: ignore[arg-type]"),
-            Some(TypeCommentKind::Ignore(vec!["arg-type".to_string()]))
-        );
+        let result = parse_type_comments("# type: ignore").unwrap();
+        assert_eq!(result.len(), 1);
+        assert!(matches!(&result[0], TypeComment::Ignore(codes) if codes.is_empty()));
+
+        let result = parse_type_comments("# type: ignore[arg-type]").unwrap();
+        assert_eq!(result.len(), 1);
+        assert!(matches!(&result[0], TypeComment::Ignore(codes) if codes == &vec!["arg-type".to_string()]));
     }
 
     #[test]
     fn test_type_comment_kind_annotation() {
-        assert_eq!(
-            parse_type_comment_kind("# type: int"),
-            Some(TypeCommentKind::TypeAnnotation("int".to_string()))
-        );
-        assert_eq!(
-            parse_type_comment_kind("# type: list[int]"),
-            Some(TypeCommentKind::TypeAnnotation("list[int]".to_string()))
-        );
-        assert_eq!(
-            parse_type_comment_kind("# type: Dict[str, int]"),
-            Some(TypeCommentKind::TypeAnnotation(
-                "Dict[str, int]".to_string()
-            ))
-        );
+        let result = parse_type_comments("# type: int").unwrap();
+        assert_eq!(result.len(), 1);
+        assert!(matches!(&result[0], TypeComment::TypeAnnotation(s) if s == "int"));
+
+        let result = parse_type_comments("# type: list[int]").unwrap();
+        assert_eq!(result.len(), 1);
+        assert!(matches!(&result[0], TypeComment::TypeAnnotation(s) if s == "list[int]"));
+
+        let result = parse_type_comments("# type: Dict[str, int]").unwrap();
+        assert_eq!(result.len(), 1);
+        assert!(matches!(&result[0], TypeComment::TypeAnnotation(s) if s == "Dict[str, int]"));
     }
 
     #[test]
     fn test_type_comment_kind_annotation_with_trailing_comment() {
-        assert_eq!(
-            parse_type_comment_kind("# type: int  # This is a comment"),
-            Some(TypeCommentKind::TypeAnnotation("int".to_string()))
-        );
-        assert_eq!(
-            parse_type_comment_kind("# type: list[int] # comment"),
-            Some(TypeCommentKind::TypeAnnotation("list[int]".to_string()))
-        );
+        let result = parse_type_comments("# type: int  # This is a comment").unwrap();
+        assert_eq!(result.len(), 1);
+        assert!(matches!(&result[0], TypeComment::TypeAnnotation(s) if s == "int"));
+
+        let result = parse_type_comments("# type: list[int] # comment").unwrap();
+        assert_eq!(result.len(), 1);
+        assert!(matches!(&result[0], TypeComment::TypeAnnotation(s) if s == "list[int]"));
     }
 
     #[test]
     fn test_type_comment_kind_annotation_with_type_ignore() {
         // Type annotation followed by type: ignore on the same line
-        assert_eq!(
-            parse_type_comment_kind("# type: str # type: ignore"),
-            Some(TypeCommentKind::TypeAnnotation("str".to_string()))
-        );
-        assert_eq!(
-            parse_type_comment_kind("# type: list[int] # type: ignore[arg-type]"),
-            Some(TypeCommentKind::TypeAnnotation("list[int]".to_string()))
-        );
+        let result = parse_type_comments("# type: str # type: ignore").unwrap();
+        assert_eq!(result.len(), 2);
+        assert!(matches!(&result[0], TypeComment::TypeAnnotation(s) if s == "str"));
+        assert!(matches!(&result[1], TypeComment::Ignore(codes) if codes.is_empty()));
+
+        let result = parse_type_comments("# type: list[int] # type: ignore[arg-type]").unwrap();
+        assert_eq!(result.len(), 2);
+        assert!(matches!(&result[0], TypeComment::TypeAnnotation(s) if s == "list[int]"));
+        assert!(matches!(&result[1], TypeComment::Ignore(codes) if codes == &vec!["arg-type".to_string()]));
     }
 
     #[test]
     fn test_type_comment_kind_not_type_comment() {
-        assert_eq!(parse_type_comment_kind("# regular comment"), None);
-        assert_eq!(parse_type_comment_kind("# TODO: fix this"), None);
-        assert_eq!(parse_type_comment_kind("# type:"), None); // Empty annotation
+        assert_eq!(parse_type_comments("# regular comment"), None);
+        assert_eq!(parse_type_comments("# TODO: fix this"), None);
+        assert_eq!(parse_type_comments("# type:"), None); // Empty annotation
     }
 
     #[test]
     fn test_type_comment_kind_whitespace_handling() {
-        assert_eq!(
-            parse_type_comment_kind("#type: int"),
-            Some(TypeCommentKind::TypeAnnotation("int".to_string()))
-        );
-        assert_eq!(
-            parse_type_comment_kind("#  type:  int  "),
-            Some(TypeCommentKind::TypeAnnotation("int".to_string()))
-        );
+        let result = parse_type_comments("#type: int").unwrap();
+        assert_eq!(result.len(), 1);
+        assert!(matches!(&result[0], TypeComment::TypeAnnotation(s) if s == "int"));
+
+        let result = parse_type_comments("#  type:  int  ").unwrap();
+        assert_eq!(result.len(), 1);
+        assert!(matches!(&result[0], TypeComment::TypeAnnotation(s) if s == "int"));
     }
 }

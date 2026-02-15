@@ -531,27 +531,24 @@ fn extract_type_comments_and_ignores(
             let location = line_index.line_column(token.start(), source);
             let line_number = location.line.get();
 
-            match type_comment::parse_type_comment_kind(comment_text) {
-                Some(type_comment::TypeCommentKind::Ignore(error_codes)) => {
-                    // Type: ignore comment
-                    type_ignore_lines.push((line_number, error_codes));
-                }
-                Some(type_comment::TypeCommentKind::TypeAnnotation(annotation)) => {
-                    // Type annotation comment - parse the type string into an AST expression
-                    // Similar to how serialize_string_type parses forward references
-                    let wrapped = format!("({})", annotation);
-                    let parse_result =
-                        parse_unchecked(&wrapped, ParseOptions::from(Mode::Expression));
+            if let Some(parts) = type_comment::parse_type_comments(comment_text) {
+                for part in parts {
+                    match part {
+                        type_comment::TypeComment::Ignore(error_codes) => {
+                            type_ignore_lines.push((line_number, error_codes));
+                        }
+                        type_comment::TypeComment::TypeAnnotation(annotation) => {
+                            let wrapped = format!("({})", annotation);
+                            let parse_result =
+                                parse_unchecked(&wrapped, ParseOptions::from(Mode::Expression));
 
-                    // Only store if parsing succeeded
-                    if parse_result.errors().is_empty() {
-                        if let ast::Mod::Expression(expr_mod) = parse_result.into_syntax() {
-                            type_comments.insert(line_number, *expr_mod.body);
+                            if parse_result.errors().is_empty() {
+                                if let ast::Mod::Expression(expr_mod) = parse_result.into_syntax() {
+                                    type_comments.insert(line_number, *expr_mod.body);
+                                }
+                            }
                         }
                     }
-                }
-                None => {
-                    // Not a type comment, skip
                 }
             }
         }
