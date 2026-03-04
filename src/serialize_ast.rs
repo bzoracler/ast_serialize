@@ -4,9 +4,9 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use anyhow::Result;
-use ruff_python_ast::{self as ast};
+use ruff_python_ast::{self as ast, AnyParameterRef, StmtFunctionDef};
 use ruff_python_ast::{Number, PySourceType};
-use ruff_python_parser::{Mode, ParseOptions, parse_unchecked};
+use ruff_python_parser::{Mode, ParseOptions, parse_unchecked, TokenKind, Tokens};
 use ruff_source_file::LineIndex;
 use ruff_text_size::{Ranged, TextRange};
 
@@ -14,13 +14,15 @@ use crate::func_effect_visitor;
 use crate::options::Options;
 use crate::reachability::TruthValue;
 use crate::type_comment;
+use crate::type_comment::parse_func_type_comment;
 
 /// Syntax error information with location details
 #[derive(Debug, Clone)]
-pub struct SyntaxError {
+pub(crate) struct SyntaxError {
     pub line: usize,
     pub column: usize,
     pub message: String,
+    pub blocker: bool,
 }
 
 // Fixed tags for primitive types (must match mypy/cache.py)
@@ -194,7 +196,7 @@ pub(crate) fn serialize_python_file(
     let parsed = parse_unchecked(&source_text, ParseOptions::from(source_type));
 
     // Extract syntax errors with location information
-    let syntax_errors: Vec<SyntaxError> = parsed
+    let mut syntax_errors: Vec<SyntaxError> = parsed
         .errors()
         .iter()
         .map(|error| {
@@ -203,6 +205,7 @@ pub(crate) fn serialize_python_file(
                 line: location.line.get(),
                 column: location.column.get(),
                 message: error.error.to_string(),
+                blocker: true,
             }
         })
         .collect();
@@ -216,6 +219,7 @@ pub(crate) fn serialize_python_file(
         bytes: Vec::new(),
         imports: Vec::new(),
         line_index,
+        tokens: Some(parsed.tokens()),
         text: &source_text,
         skip_function_bodies,
         in_class: false,
@@ -228,6 +232,7 @@ pub(crate) fn serialize_python_file(
         current_mypy_only: false,
         top_level_getattr: false,
         is_evaluated: true,
+        extra_errors: Vec::new(),
     };
     parsed.syntax().serialize(&mut ser);
 
@@ -243,6 +248,7 @@ pub(crate) fn serialize_python_file(
     // Return this directly to caller, so that it can check this without deserialization
     let is_partial_package = is_stub_package && ser.top_level_getattr;
 
+    syntax_errors.extend(ser.extra_errors);
     Ok((ser.bytes, syntax_errors, type_ignore_lines, import_bytes, is_partial_package))
 }
 
@@ -275,22 +281,31 @@ enum ImportStatement {
     },
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum ParsedTypeComment {
+    Regular(ast::Expr),  // Comment like `# type: int`
+    Function(Vec<ast::Expr>, ast::Expr),  // Comment like `# type: (int, str) -> None`
+    Invalid(String),  // Error message for invalid type comment
+}
+
 struct Serializer<'a> {
     bytes: Vec<u8>,
     imports: Vec<ImportStatement>, // Encountered import statements
     line_index: LineIndex,
+    tokens: Option<&'a Tokens>,  // All tokens (not set when serializing imports, and in tests)
     text: &'a str,
     skip_function_bodies: bool, // Whether to omit function bodies without visible effects
     in_class: bool,             // Whether we're currently inside a class definition
     in_function: bool,          // Whether we're currently inside a function definition
     is_all_ascii: bool,         // Whether the entire file contains only ASCII characters
     lines_with_non_ascii: Vec<bool>, // Per-line flags: true if line has non-ASCII (empty if is_all_ascii)
-    type_comments: HashMap<usize, ast::Expr>, // Type comments by line number (1-indexed)
+    type_comments: HashMap<usize, ParsedTypeComment>, // Type comments by line number (1-indexed)
     options: Options,           // Reachability analysis options
     current_unreachable: bool,  // Whether we're currently in an unreachable block
     current_mypy_only: bool,    // Whether we're currently in a mypy-only block (e.g., if TYPE_CHECKING)
     top_level_getattr: bool,    // Does module have top-level __getattr__() function
     is_evaluated: bool,         // Current type is evaluated at runtime (or is it a type comment/string)
+    extra_errors: Vec<SyntaxError>,  // Additional errors found while processing parsed tree
 }
 
 impl<'a> Serializer<'a> {
@@ -461,6 +476,20 @@ impl<'a> Serializer<'a> {
         self.write_end_tag();
     }
 
+    fn add_error(&mut self, error: String, range: TextRange, blocker: bool) {
+        let st_loc = self.line_index.line_column(range.start(), self.text);
+        let st_line = st_loc.line.get();
+        let st_column_bytes = st_loc.column.get();
+        let st_column = self.convert_column_to_codepoint(st_loc.line.get(), st_column_bytes);
+        self.extra_errors.push(
+            SyntaxError {
+                line: st_line,
+                column: st_column - 1,  // convert to 0-based
+                message: error,
+                blocker,
+            }
+        );
+    }
 }
 
 trait Ser {
@@ -534,7 +563,7 @@ fn extract_type_comments_and_ignores(
     tokens: &ruff_python_parser::Tokens,
     source: &str,
     line_index: &LineIndex,
-) -> (Vec<(usize, Vec<String>)>, HashMap<usize, ast::Expr>) {
+) -> (Vec<(usize, Vec<String>)>, HashMap<usize, ParsedTypeComment>) {
     let mut type_ignore_lines = Vec::new();
     let mut type_comments = HashMap::new();
 
@@ -557,8 +586,28 @@ fn extract_type_comments_and_ignores(
 
                             if parse_result.errors().is_empty() {
                                 if let ast::Mod::Expression(expr_mod) = parse_result.into_syntax() {
-                                    type_comments.insert(line_number, *expr_mod.body);
+                                    type_comments.insert(
+                                        line_number, ParsedTypeComment::Regular(*expr_mod.body)
+                                    );
                                 }
+                            } else {
+                                // If parsing as regular type failed, try parsing it as a function type comment.
+                                let as_function_comment = parse_func_type_comment(annotation.as_str());
+                                if let Some((arg_types, ret_type)) = as_function_comment {
+                                    let parsed_function_comment = function_comment_to_expr(arg_types, ret_type);
+                                    if let Some((parsed_arg_types, parsed_ret_type)) = parsed_function_comment {
+                                        type_comments.insert(
+                                            line_number, ParsedTypeComment::Function(parsed_arg_types, parsed_ret_type)
+                                        );
+                                        continue;
+                                    }
+                                }
+                                // If nothing worked (but we know it is a `# type:` comment), record an error.
+                                type_comments.insert(
+                                    line_number, ParsedTypeComment::Invalid(
+                                        format!("Syntax error in type comment \"{annotation}\"").to_string()
+                                    )
+                                );
                             }
                         }
                     }
@@ -568,6 +617,34 @@ fn extract_type_comments_and_ignores(
     }
 
     (type_ignore_lines, type_comments)
+}
+
+fn function_comment_to_expr(
+    arg_types: Vec<String>,
+    ret_type: String,
+) -> Option<(Vec<ast::Expr>, ast::Expr)> {
+    let mut parsed_arg_types = Vec::with_capacity(arg_types.len());
+    for arg_type in arg_types {
+        let wrapped = format!("({})", arg_type);
+        let parse_result =
+            parse_unchecked(&wrapped, ParseOptions::from(Mode::Expression));
+        if parse_result.errors().is_empty() {
+            if let ast::Mod::Expression(expr_mod) = parse_result.into_syntax() {
+                parsed_arg_types.push(*expr_mod.body);
+            }
+        } else {
+            return None;
+        }
+    }
+    let wrapped = format!("({})", ret_type);
+    let parse_result =
+        parse_unchecked(&wrapped, ParseOptions::from(Mode::Expression));
+    if parse_result.errors().is_empty() {
+        if let ast::Mod::Expression(expr_mod) = parse_result.into_syntax() {
+            return Some((parsed_arg_types, *expr_mod.body));
+        }
+    }
+    None
 }
 
 /// Helper function to serialize bytes literal to escaped string representation
@@ -633,7 +710,9 @@ fn argument_elide_name(name: &str) -> bool {
     name.starts_with("__") && !name.ends_with("__")
 }
 
-fn serialize_parameters(ser: &mut Serializer, params: &ast::Parameters) {
+fn serialize_parameters(
+    ser: &mut Serializer, params: &ast::Parameters, arg_comments: Vec<Option<ast::Expr>>,
+) {
     // Count total number of arguments
     let mut arg_count = 0;
     arg_count += params.posonlyargs.len();
@@ -650,16 +729,20 @@ fn serialize_parameters(ser: &mut Serializer, params: &ast::Parameters) {
     ser.write_tag(TAG_LIST_GEN);
     ser.write_int(arg_count as i64);
 
+    let mut idx = 0;
+
     // Serialize positional-only arguments
     for param in &params.posonlyargs {
         serialize_argument(
             ser,
             &param.parameter,
+            &arg_comments[idx],
             param.default.as_deref(),
             ARG_POS,
             ARG_OPT,
             true,
         );
+        idx += 1;
     }
 
     // Serialize regular positional arguments
@@ -668,16 +751,21 @@ fn serialize_parameters(ser: &mut Serializer, params: &ast::Parameters) {
         serialize_argument(
             ser,
             &param.parameter,
+            &arg_comments[idx],
             param.default.as_deref(),
             ARG_POS,
             ARG_OPT,
             pos_only,
         );
+        idx += 1;
     }
 
     // Serialize *args
     if let Some(vararg) = &params.vararg {
-        serialize_argument(ser, vararg, None, ARG_STAR, ARG_STAR, false);
+        serialize_argument(
+            ser, vararg, &arg_comments[idx], None, ARG_STAR, ARG_STAR, false
+        );
+        idx += 1;
     }
 
     // Serialize keyword-only arguments
@@ -685,22 +773,27 @@ fn serialize_parameters(ser: &mut Serializer, params: &ast::Parameters) {
         serialize_argument(
             ser,
             &param.parameter,
+            &arg_comments[idx],
             param.default.as_deref(),
             ARG_NAMED,
             ARG_NAMED_OPT,
             false,
         );
+        idx += 1;
     }
 
     // Serialize **kwargs
     if let Some(kwarg) = &params.kwarg {
-        serialize_argument(ser, kwarg, None, ARG_STAR2, ARG_STAR2, false);
+        serialize_argument(
+            ser, kwarg, &arg_comments[idx], None, ARG_STAR2, ARG_STAR2, false
+        );
     }
 }
 
 fn serialize_argument(
     ser: &mut Serializer,
     param: &ast::Parameter,
+    arg_comment: &Option<ast::Expr>,
     default_expr: Option<&ast::Expr>,
     kind_no_default: i64,
     kind_with_default: i64,
@@ -717,9 +810,24 @@ fn serialize_argument(
     };
     ser.write_tagged_int(kind);
 
+    if param.annotation.is_some() && arg_comment.is_some() {
+        ser.add_error(
+            "Function has duplicate type signatures".to_string(),
+            param.range(),
+            false,
+        );
+    }
     if let Some(ann) = &param.annotation {
         ser.write_bool(true);
         serialize_type(ser, ann);
+    } else if arg_comment.is_some() {
+        ser.write_bool(true);
+        let mut arg_comment = arg_comment.clone().unwrap();
+        ast::relocate::relocate_expr(&mut arg_comment, param.range());
+        let was_evaluated = ser.is_evaluated;
+        ser.is_evaluated = false;
+        serialize_type(ser, &arg_comment);
+        ser.is_evaluated = was_evaluated;
     } else {
         ser.write_bool(false);
     }
@@ -834,10 +942,109 @@ fn serialize_type_params(ser: &mut Serializer, type_params: &ast::TypeParams) {
     }
 }
 
+fn find_func_type_comment(
+    ser: &mut Serializer,
+    func: &StmtFunctionDef,
+) -> (Vec<Option<ast::Expr>>, Option<ast::Expr>) {
+    let mut arg_types = Vec::with_capacity(func.parameters.len());
+    for _ in 0..func.parameters.len() {
+        arg_types.push(None);
+    }
+    let mut ret_type = None;
+    if func.body.is_empty() {
+        return (arg_types, ret_type);
+    }
+    let first_stmt = func.body[0].start();
+    let tokens = ser.tokens.unwrap();
+    let tokens_before = tokens.before(first_stmt);
+    let mut idx = tokens_before.len() - 1;
+    loop {
+        // Look for function type comments between colon in `def foo(...):` anr first statement.
+        let token = tokens_before[idx].kind();
+        if token == TokenKind::Colon {
+            break;
+        }
+        if token == TokenKind::Comment {
+            let location = ser.line_index.line_column(tokens_before[idx].start(), ser.text);
+            let line_number = location.line.get();
+            if let Some(ParsedTypeComment::Function(args, ret)) = ser.type_comments.get(&line_number) {
+                ret_type = Some(ret.clone());
+                if args.len() == 1 {
+                    if let Some(ast::Expr::EllipsisLiteral(_)) = args.get(0) {
+                        // Special case, single ellipsis like literally `# type: (...) -> None`.
+                        break;
+                    }
+                }
+                if args.len() == func.parameters.len() {
+                    for idx in 0..args.len() {
+                        arg_types[idx] = Some(args[idx].clone());
+                    }
+                } else if ser.in_class && args.len() == func.parameters.len() - 1 {
+                    // Skip the self or cls argument in methods.
+                    for idx in 1..func.parameters.len() {
+                        arg_types[idx] = Some(args[idx - 1].clone());
+                    }
+                } else {
+                    let err =
+                    if args.len() > func.parameters.len() {
+                        "Type signature has too many parameters"
+                    } else {
+                        "Type signature has too few parameters"
+                    };
+                    ser.add_error(err.to_string(), func.range(), false);
+                }
+                break;
+            }
+            if let Some(ParsedTypeComment::Invalid(error)) = ser.type_comments.get(&line_number) {
+                ser.add_error(error.to_string(), func.range(), false);
+                break;
+            }
+        }
+        idx -= 1;
+    }
+    // Also look for per-argument (regular) type comments (in multi-line signatures).
+    for (idx, param) in func.parameters.iter().enumerate() {
+        if let AnyParameterRef::Variadic(param) = param {
+            let location = ser.line_index.line_column(param.start(), ser.text);
+            let line = location.line.get();
+            if let Some(ParsedTypeComment::Regular(arg_type)) = ser.type_comments.get(&line) {
+                if arg_types[idx].is_some() {
+                    ser.add_error(
+                        "Function has duplicate type signatures".to_string(),
+                        func.range(),
+                        false,
+                    );
+                } else {
+                    arg_types[idx] = Some(arg_type.clone());
+                }
+            }
+        }
+        // Repeating this block twice is a bit unfortunate, but we do it
+        // because two enum options are slightly different.
+        if let AnyParameterRef::NonVariadic(param) = param {
+            let location = ser.line_index.line_column(param.start(), ser.text);
+            let line = location.line.get();
+            if let Some(ParsedTypeComment::Regular(arg_type)) = ser.type_comments.get(&line) {
+                if arg_types[idx].is_some() {
+                    ser.add_error(
+                        "Function has duplicate type signatures".to_string(),
+                        func.range(),
+                        false,
+                    );
+                } else {
+                    arg_types[idx] = Some(arg_type.clone());
+                }
+            }
+        }
+    }
+    (arg_types, ret_type)
+}
+
 impl Ser for ast::Stmt {
     fn serialize(&self, ser: &mut Serializer) {
         match self {
             ast::Stmt::FunctionDef(f) => {
+                let (arg_comments, ret_comment) = find_func_type_comment(ser, f);
                 if !f.decorator_list.is_empty() {
                     ser.write_tag(TAG_DECORATOR);
                     // Serialize decorators
@@ -860,7 +1067,7 @@ impl Ser for ast::Stmt {
                 // Function name
                 ser.write_bytes(f.name.as_bytes());
                 // Parameters
-                serialize_parameters(ser, &f.parameters);
+                serialize_parameters(ser, &f.parameters, arg_comments);
 
                 // Body - may be omitted if skip_function_bodies is enabled
                 let should_serialize_body = if ser.skip_function_bodies {
@@ -916,9 +1123,24 @@ impl Ser for ast::Stmt {
                 }
 
                 // Return type annotation
+                if f.returns.is_some() && ret_comment.is_some() {
+                    ser.add_error(
+                        "Function has duplicate type signatures".to_string(),
+                        f.range(),
+                        false,
+                    );
+                }
                 if let Some(ret) = &f.returns {
                     ser.write_bool(true); // No return annotation
                     serialize_type(ser, ret);
+                } else if ret_comment.is_some(){
+                    ser.write_bool(true);
+                    let mut ret_comment = ret_comment.unwrap();
+                    ast::relocate::relocate_expr(&mut ret_comment, f.range());
+                    let was_evaluated = ser.is_evaluated;
+                    ser.is_evaluated = false;
+                    serialize_type(ser, &ret_comment);
+                    ser.is_evaluated = was_evaluated;
                 } else {
                     ser.write_bool(false); // No return annotation
                 }
@@ -972,7 +1194,7 @@ impl Ser for ast::Stmt {
                 // Clone the type expression to avoid borrow checker issues
                 let type_expr = ser.type_comments.get(&line_number).cloned();
 
-                if let Some(mut type_expr) = type_expr {
+                if let Some(ParsedTypeComment::Regular(mut type_expr)) = type_expr {
                     // Has type annotation from type comment
                     ser.write_bool(true);
                     ast::relocate::relocate_expr(&mut type_expr, a.range());
@@ -980,6 +1202,12 @@ impl Ser for ast::Stmt {
                     ser.is_evaluated = false;
                     serialize_type(ser, &type_expr);
                     ser.is_evaluated = was_evaluated;
+                } else if let Some(ParsedTypeComment::Invalid(error)) = type_expr{
+                    ser.add_error(error, a.range(), false);
+                    ser.write_bool(true);
+                    serialize_invalid_type(ser);
+                    ser.write_location(a.range());
+                    ser.write_end_tag();
                 } else {
                     // No type annotation
                     ser.write_bool(false);
@@ -1897,7 +2125,11 @@ impl Ser for ast::Expr {
 
                 // Arguments (parameters)
                 if let Some(params) = &lambda.parameters {
-                    serialize_parameters(ser, params);
+                    let mut empty = Vec::with_capacity(params.len());
+                    for _ in 0..params.len() {
+                        empty.push(None);
+                    }
+                    serialize_parameters(ser, params, empty);
                 } else {
                     // No parameters - empty argument list
                     ser.write_tag(TAG_LIST_GEN);
@@ -2637,6 +2869,7 @@ pub fn serialize_imports(
         bytes: Vec::new(),
         imports: Vec::new(),
         line_index,
+        tokens: None,
         text,
         skip_function_bodies: false,
         in_class: false,
@@ -2649,6 +2882,7 @@ pub fn serialize_imports(
         current_mypy_only: false,
         top_level_getattr: false,
         is_evaluated: true,
+        extra_errors: Vec::new(),
     };
 
     // Write list of imports
@@ -2767,6 +3001,7 @@ mod tests {
             bytes: Vec::new(),
             imports: Vec::new(),
             line_index: index,
+            tokens: None,
             text,
             skip_function_bodies: false,
             in_class: false,
@@ -2779,6 +3014,7 @@ mod tests {
             current_mypy_only: false,
             top_level_getattr: false,
             is_evaluated: true,
+            extra_errors: Vec::new(),
         }
     }
 
@@ -2897,8 +3133,10 @@ mod tests {
         // Test that we can parse and serialize files with Unicode characters
         let text = "# Comment with 中文\ndef привет():\n    x = \"🎉\"\n";
         let opt = ParseOptions::from(PySourceType::Python);
-        let ast = parse_unchecked(text, opt).into_syntax();
+        let parsed = parse_unchecked(text, opt);
+        let ast = parsed.syntax();
         let mut ser = make_ser(text);
+        ser.tokens = Some(parsed.tokens());
 
         // Should not panic
         ast.serialize(&mut ser);
@@ -2942,8 +3180,10 @@ mod tests {
         // Test that Unicode handling works correctly with Windows (CRLF) line endings
         let text = "# Comment with 中文\r\ndef привет():\r\n    x = \"🎉\"\r\n";
         let opt = ParseOptions::from(PySourceType::Python);
-        let ast = parse_unchecked(text, opt).into_syntax();
+        let parsed = parse_unchecked(text, opt);
+        let ast = parsed.syntax();
         let mut ser = make_ser(text);
+        ser.tokens = Some(parsed.tokens());
 
         // Should not panic with CRLF line endings
         ast.serialize(&mut ser);
