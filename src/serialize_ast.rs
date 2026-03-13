@@ -176,7 +176,7 @@ pub(crate) fn serialize_python_file(
     file_path: &Path,
     skip_function_bodies: bool,
     options: Options,
-) -> Result<(Vec<u8>, Vec<SyntaxError>, Vec<(usize, Vec<String>)>, Vec<u8>, bool)> {
+) -> Result<(Vec<u8>, Vec<SyntaxError>, Vec<(usize, Vec<String>)>, Vec<(usize, Vec<String>)>, Vec<u8>, bool)> {
     let source_type = PySourceType::from(file_path);
     let source_text = std::fs::read_to_string(file_path)?;
     let line_index = LineIndex::from_source_text(&source_text);
@@ -213,7 +213,7 @@ pub(crate) fn serialize_python_file(
         .collect();
 
     // Extract both type: ignore comments and type annotation comments in a single pass
-    let (mut type_ignore_lines, type_comments) =
+    let (mut type_ignore_lines, mut mypy_ignore_lines, type_comments) =
         extract_type_comments_and_ignores(parsed.tokens(), &source_text, &line_index);
 
     let mut top_unreachable = false;
@@ -286,7 +286,8 @@ pub(crate) fn serialize_python_file(
     syntax_errors.extend(ser.extra_errors);
     // Skip type ignores on unreachable lines, so that they are not flagged as unused.
     type_ignore_lines.retain(|(line, _)| {!ser.skipped_lines.contains(line)});
-    Ok((ser.bytes, syntax_errors, type_ignore_lines, import_bytes, is_partial_package))
+    mypy_ignore_lines.retain(|(line, _)| {!ser.skipped_lines.contains(line)});
+    Ok((ser.bytes, syntax_errors, type_ignore_lines, mypy_ignore_lines, import_bytes, is_partial_package))
 }
 
 // Bit flags for import statement metadata
@@ -645,8 +646,9 @@ fn extract_type_comments_and_ignores(
     tokens: &Tokens,
     source: &str,
     line_index: &LineIndex,
-) -> (Vec<(usize, Vec<String>)>, HashMap<usize, ParsedTypeComment>) {
+) -> (Vec<(usize, Vec<String>)>, Vec<(usize, Vec<String>)>, HashMap<usize, ParsedTypeComment>) {
     let mut type_ignore_lines = Vec::new();
+    let mut mypy_ignore_lines = Vec::new();
     let mut type_comments = HashMap::new();
 
     for token in tokens.iter() {
@@ -658,8 +660,11 @@ fn extract_type_comments_and_ignores(
             if let Some(parts) = type_comment::parse_type_comments(comment_text) {
                 for part in parts {
                     match part {
-                        type_comment::TypeComment::Ignore(error_codes) => {
+                        type_comment::TypeComment::TypeIgnore(error_codes) => {
                             type_ignore_lines.push((line_number, error_codes));
+                        }
+                        type_comment::TypeComment::MypyIgnore(error_codes) => {
+                            mypy_ignore_lines.push((line_number, error_codes));
                         }
                         type_comment::TypeComment::TypeAnnotation(annotation) => {
                             let wrapped = format!("({})", annotation);
@@ -698,7 +703,7 @@ fn extract_type_comments_and_ignores(
         }
     }
 
-    (type_ignore_lines, type_comments)
+    (type_ignore_lines, mypy_ignore_lines, type_comments)
 }
 
 fn function_comment_to_expr(
