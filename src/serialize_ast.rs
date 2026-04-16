@@ -1347,7 +1347,7 @@ impl Ser for ast::Stmt {
                 } else if let Some(ParsedTypeComment::Invalid(error)) = type_expr {
                     ser.add_error(error, a.range(), false);
                     ser.write_bool(true);
-                    serialize_invalid_type(ser);
+                    serialize_invalid_type(ser, None);
                     ser.write_location(a.range());
                     ser.write_end_tag();
                 } else {
@@ -2584,10 +2584,17 @@ fn serialize_fstring_elements(ser: &mut Serializer, elems: Vec<&ast::Interpolate
 
 /// Helper to serialize an invalid type annotation as RawExpressionType with typing.Any.
 /// This is used for expressions that are not valid in type contexts (e.g., 3.14, int + str).
-fn serialize_invalid_type(ser: &mut Serializer) {
+fn serialize_invalid_type(ser: &mut Serializer, note: Option<&[u8]>) {
     ser.write_tag(TAG_RAW_EXPRESSION_TYPE);
     ser.write_bytes(b"typing.Any");
     ser.write_tag(TAG_LITERAL_NONE);
+    if ser.options.cache_version() >= 2 {
+        if let Some(note) = note {
+            ser.write_bytes(note);
+        } else {
+            ser.write_tag(TAG_LITERAL_NONE);
+        }
+    }
 }
 
 fn is_string_or_none(e: &Option<ast::Expr>) -> bool {
@@ -2596,6 +2603,44 @@ fn is_string_or_none(e: &Option<ast::Expr>) -> bool {
         None => true,
         _ => false,
     }
+}
+
+/// Serialize a type expression that appears inside a List context.
+/// Call expressions are treated as argument constructors (Arg/DefaultArg/VarArg/KwArg)
+/// only in this context (e.g., Callable[[Arg(int, 'x')], ret]).
+fn serialize_type_in_list(ser: &mut Serializer, t: &ast::Expr) {
+    if let ast::Expr::Call(c) = t {
+        ser.write_tag(TAG_CALL_TYPE);
+
+        // Serialize callee
+        serialize_type(ser, &c.func);
+
+        // Serialize positional arguments
+        ser.write_tag(TAG_LIST_GEN);
+        ser.write_int(c.arguments.args.len() as i64);
+        for arg in &c.arguments.args {
+            serialize_type(ser, arg);
+        }
+
+        // Serialize keyword arguments (name, value pairs)
+        ser.write_tag(TAG_LIST_GEN);
+        ser.write_int(c.arguments.keywords.len() as i64);
+        for keyword in &c.arguments.keywords {
+            // Write keyword name (could be None for **kwargs)
+            if let Some(name) = &keyword.arg {
+                ser.write_bytes(name.as_bytes());
+            } else {
+                ser.write_tag(TAG_LITERAL_NONE);
+            }
+            // Write keyword value
+            serialize_type(ser, &keyword.value);
+        }
+
+        ser.write_location(c.range());
+        ser.write_end_tag();
+        return;
+    }
+    serialize_type(ser, t);
 }
 
 /// Main entry point for serializing type annotations.
@@ -2630,12 +2675,12 @@ fn serialize_type(ser: &mut Serializer, t: &ast::Expr) {
                     ser.write_tagged_int(int_val);
                 } else {
                     // Integer too large for i64 - serialize as invalid type
-                    serialize_invalid_type(ser);
+                    serialize_invalid_type(ser, None);
                 }
             } else {
                 // Float/complex number literals are not valid in type annotations
                 // Serialize as invalid type
-                serialize_invalid_type(ser);
+                serialize_invalid_type(ser, None);
             }
         }
         ast::Expr::BinOp(e) => {
@@ -2646,7 +2691,7 @@ fn serialize_type(ser: &mut Serializer, t: &ast::Expr) {
             } else {
                 // Other binary operators are not valid in type annotations
                 // Serialize as invalid type
-                serialize_invalid_type(ser);
+                serialize_invalid_type(ser, None);
             }
         }
         ast::Expr::List(e) => {
@@ -2655,7 +2700,10 @@ fn serialize_type(ser: &mut Serializer, t: &ast::Expr) {
             ser.write_tag(TAG_LIST_GEN);
             ser.write_int(e.elts.len() as i64);
             for item in &e.elts {
-                serialize_type(ser, item);
+                // Use serialize_type_in_list so that Call expressions are treated
+                // as argument constructors (Arg/DefaultArg/VarArg/KwArg) only
+                // when inside a list context (e.g., Callable[[Arg(int, 'x')], ret]).
+                serialize_type_in_list(ser, item);
             }
         }
         ast::Expr::Tuple(e) => {
@@ -2695,36 +2743,29 @@ fn serialize_type(ser: &mut Serializer, t: &ast::Expr) {
                     serialize_type(ser, &item.value);
                 }
             } else {
-                serialize_invalid_type(ser);
+                serialize_invalid_type(ser, None);
             }
         }
         ast::Expr::Call(c) => {
-            // Handle Call in type context (e.g., Arg(int, 'x'))
-            ser.write_tag(TAG_CALL_TYPE);
-
-            // Serialize callee
-            serialize_type(ser, &c.func);
-
-            // Serialize positional arguments
-            ser.write_tag(TAG_LIST_GEN);
-            ser.write_int(c.arguments.args.len() as i64);
-            for arg in &c.arguments.args {
-                serialize_type(ser, arg);
-            }
-
-            // Serialize keyword arguments (name, value pairs)
-            ser.write_tag(TAG_LIST_GEN);
-            ser.write_int(c.arguments.keywords.len() as i64);
-            for keyword in &c.arguments.keywords {
-                // Write keyword name (could be None for **kwargs)
-                if let Some(name) = &keyword.arg {
-                    ser.write_bytes(name.as_bytes());
+            // Call expressions are usually not valid as types. Argument constructor
+            // calls (Arg/DefaultArg/VarArg/KwArg) are an exception and are handled
+            // in serialize_type_in_list.
+            let mut name = Vec::new();
+            let note = if get_qualified_type_name(&mut name, &c.func) {
+                if c.arguments.keywords.is_empty() {
+                    let mut note = b"Suggestion: use ".to_vec();
+                    note.extend_from_slice(&name);
+                    note.extend_from_slice(b"[...] instead of ");
+                    note.extend_from_slice(&name);
+                    note.extend_from_slice(b"(...)");
+                    Some(note)
                 } else {
-                    ser.write_tag(TAG_LITERAL_NONE);
+                    Some(b"Cannot use a function call in a type annotation".to_vec())
                 }
-                // Write keyword value
-                serialize_type(ser, &keyword.value);
-            }
+            } else {
+                None
+            };
+            serialize_invalid_type(ser, note.as_deref());
         }
         ast::Expr::EllipsisLiteral(_) => {
             ser.write_tag(TAG_ELLIPSIS_TYPE);
@@ -2750,7 +2791,7 @@ fn serialize_type(ser: &mut Serializer, t: &ast::Expr) {
                     return;
                 } else {
                     // Negative number too large - serialize as invalid type
-                    serialize_invalid_type(ser);
+                    serialize_invalid_type(ser, None);
                 }
             } else if matches!(e.op, ast::UnaryOp::UAdd) {
                 // Positive unary operator (+) - preserve the underlying value
@@ -2765,12 +2806,12 @@ fn serialize_type(ser: &mut Serializer, t: &ast::Expr) {
                     return;
                 } else {
                     // Number too large or not an integer - serialize as invalid type
-                    serialize_invalid_type(ser);
+                    serialize_invalid_type(ser, None);
                 }
             } else {
                 // Other unary operators (not, ~, etc.) are not valid in type annotations
                 // Serialize as invalid type
-                serialize_invalid_type(ser);
+                serialize_invalid_type(ser, None);
             }
         }
         ast::Expr::StringLiteral(s) => {
@@ -2801,7 +2842,7 @@ fn serialize_type(ser: &mut Serializer, t: &ast::Expr) {
         _ => {
             // Unsupported expression type in type annotation
             // Serialize as invalid type
-            serialize_invalid_type(ser);
+            serialize_invalid_type(ser, None);
         }
     }
     ser.write_location(t.range());
@@ -2931,7 +2972,7 @@ fn serialize_attribute_type(
     let mut v = Vec::new();
     if !get_qualified_type_name(&mut v, expr) {
         // Invalid expression for qualified name - serialize as invalid type
-        serialize_invalid_type(ser);
+        serialize_invalid_type(ser, None);
         return;
     }
     ser.write_tag(TAG_UNBOUND_TYPE);
@@ -2964,7 +3005,7 @@ fn serialize_subscript_type(
     let mut v = Vec::new();
     if !get_qualified_type_name(&mut v, &subscript.value) {
         // Invalid expression for qualified name - serialize as invalid type
-        serialize_invalid_type(ser);
+        serialize_invalid_type(ser, None);
         return;
     }
     ser.write_tag(TAG_UNBOUND_TYPE);
