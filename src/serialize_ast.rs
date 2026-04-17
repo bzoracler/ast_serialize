@@ -191,148 +191,41 @@ pub(crate) fn serialize_python_file(
     String,
     Vec<(usize, String)>,
 )> {
-    let source_type = PySourceType::from(file_path);
-    let source_text = std::fs::read_to_string(file_path)?;
-
-    // Compute SHA1 hash of the source text (same as mypy's compute_hash)
-    let hash_hex = {
-        let hash = Sha1::digest(source_text.as_bytes());
-        let mut hex = String::with_capacity(40);
-        for byte in hash {
-            write!(hex, "{byte:02x}").unwrap();
-        }
-        hex
-    };
-    let line_index = LineIndex::from_source_text(&source_text);
-    let is_stub_package = match file_path.file_name() {
-        Some(file) => file.as_encoded_bytes() == b"__init__.pyi",
-        _ => false,
-    };
-
-    // Check if file is all ASCII and build per-line non-ASCII flags if needed
-    let is_all_ascii = source_text.is_ascii();
-    let lines_with_non_ascii = if is_all_ascii {
-        Vec::new() // No need to track per-line if whole file is ASCII
-    } else {
-        // Build a Vec<bool> indicating which lines have non-ASCII characters
-        source_text.lines().map(|line| !line.is_ascii()).collect()
-    };
-
-    // Parse the file - this always returns a result, even with syntax errors
-    let parsed = parse_unchecked(&source_text, ParseOptions::from(source_type));
-
-    // Extract syntax errors with location information
-    let mut syntax_errors: Vec<SyntaxError> = parsed
-        .errors()
-        .iter()
-        .map(|error| {
-            let location = line_index.line_column(error.location.start(), &source_text);
-            SyntaxError {
-                line: location.line.get(),
-                column: location.column.get(),
-                message: error.error.to_string(),
-                blocker: true,
-            }
-        })
-        .collect();
-
-    // Extract both type: ignore comments and type annotation comments in a single pass
-    let (mut type_ignore_lines, mut mypy_ignore_lines, type_comments, mypy_comments) =
-        extract_type_comments_and_ignores(parsed.tokens(), &source_text, &line_index);
-
-    // Apply inline config overrides that affect parsing/serialization.
-    let inline_overrides = crate::mypy_inline_config::resolve_overrides(&mypy_comments);
-    options.extend_always_true(inline_overrides.always_true);
-    options.extend_always_false(inline_overrides.always_false);
-    // Inline ignore-errors can only enable body skipping, not disable it,
-    // since the caller may have set skip_function_bodies based on other
-    // context (e.g. ignore_all from config file section matching).
-    if inline_overrides.ignore_errors == Some(true) {
-        skip_function_bodies = true;
-    }
-
-    let mut top_unreachable = false;
-    let first_ignore = type_ignore_lines.get(0).cloned();
-    let first_statement_line = first_statement_line(parsed.syntax(), &source_text, &line_index);
-
-    if first_ignore.is_some() {
-        let (first_line, codes) = first_ignore.unwrap();
-        if first_line < first_statement_line {
-            top_unreachable = true;
-            type_ignore_lines = Vec::new();
-            if !codes.is_empty() {
-                let joined = codes.join(", ");
-                let error = format!(
-                    "Type ignore with error code is not supported for modules; \
-                    use `# mypy: disable-error-code=\"{}\"`",
-                    joined
-                );
-                syntax_errors.push(SyntaxError {
-                    line: first_line,
-                    column: 0,
-                    message: error,
-                    blocker: false,
-                })
-            }
-        }
-    }
-
-    // Serialize the AST (even if partial due to syntax errors)
-    let mut ser = Serializer {
-        bytes: Vec::new(),
-        imports: Vec::new(),
-        line_index,
-        tokens: Some(parsed.tokens()),
-        text: &source_text,
+    serialize_module(
+        std::fs::read_to_string(file_path)?,
+        PySourceType::from(file_path),
         skip_function_bodies,
-        in_class: false,
-        in_function: false,
-        is_all_ascii,
-        lines_with_non_ascii,
-        type_comments,
         options,
-        current_unreachable: false,
-        current_mypy_only: false,
-        top_level_getattr: false,
-        is_evaluated: true,
-        extra_errors: Vec::new(),
-        skipped_lines: HashSet::new(),
-        uses_template_strings: false,
-    };
-    if top_unreachable {
-        // Module is ignored completely.
-        ser.write_tagged_int(0);
-    } else {
-        parsed.syntax().serialize(&mut ser);
-    }
+        match file_path.file_name() {
+            Some(file) => file.as_encoded_bytes() == b"__init__.pyi",
+            _ => false,
+        },
+    )
+}
 
-    // Serialize the collected imports, reusing the moved state from serializer
-    let import_bytes = serialize_imports(
-        &ser.imports,
-        &source_text,
-        Some(ser.line_index),
-        Some(is_all_ascii),
-        Some(ser.lines_with_non_ascii),
-    );
-
-    // Return this directly to caller, so that it can check this without deserialization
-    let is_partial_package = is_stub_package && ser.top_level_getattr;
-
-    syntax_errors.extend(ser.extra_errors);
-    // Skip type ignores on unreachable lines, so that they are not flagged as unused.
-    type_ignore_lines.retain(|(line, _)| !ser.skipped_lines.contains(line));
-    mypy_ignore_lines.retain(|(line, _)| !ser.skipped_lines.contains(line));
-    Ok((
-        ser.bytes,
-        syntax_errors,
-        type_ignore_lines,
-        mypy_ignore_lines,
-        import_bytes,
-        is_partial_package,
-        ser.uses_template_strings,
-        hash_hex,
-        mypy_comments,
-    ))
+/// Serialize Python source code to mypy AST format
+pub(crate) fn serialize_python_source(
+    source: String,
+    mut skip_function_bodies: bool,
+    mut options: Options,
+) -> Result<(
+    Vec<u8>,
+    Vec<SyntaxError>,
+    Vec<(usize, Vec<String>)>,
+    Vec<(usize, Vec<String>)>,
+    Vec<u8>,
+    bool,
+    bool,
+    String,
+    Vec<(usize, String)>,
+)> {
+    serialize_module(
+        source,
+        PySourceType::Python,
+        skip_function_bodies,
+        options,
+        false,
+    )
 }
 
 // Bit flags for import statement metadata
@@ -2576,6 +2469,160 @@ impl Ser for ast::Pattern {
         };
         ser.write_end_tag()
     }
+}
+
+fn serialize_module(
+    source_text: String,
+    source_type: PySourceType,
+    mut skip_function_bodies: bool,
+    mut options: Options,
+    is_stub_package: bool,
+) -> Result<(
+    Vec<u8>,
+    Vec<SyntaxError>,
+    Vec<(usize, Vec<String>)>,
+    Vec<(usize, Vec<String>)>,
+    Vec<u8>,
+    bool,
+    bool,
+    String,
+    Vec<(usize, String)>,
+)> {
+    // Compute SHA1 hash of the source text (same as mypy's compute_hash)
+    let hash_hex = {
+        let hash = Sha1::digest(source_text.as_bytes());
+        let mut hex = String::with_capacity(40);
+        for byte in hash {
+            write!(hex, "{byte:02x}").unwrap();
+        }
+        hex
+    };
+    let line_index = LineIndex::from_source_text(&source_text);
+
+    // Check if file is all ASCII and build per-line non-ASCII flags if needed
+    let is_all_ascii = source_text.is_ascii();
+    let lines_with_non_ascii = if is_all_ascii {
+        Vec::new() // No need to track per-line if whole file is ASCII
+    } else {
+        // Build a Vec<bool> indicating which lines have non-ASCII characters
+        source_text.lines().map(|line| !line.is_ascii()).collect()
+    };
+
+    // Parse the file - this always returns a result, even with syntax errors
+    let parsed = parse_unchecked(&source_text, ParseOptions::from(source_type));
+
+    // Extract syntax errors with location information
+    let mut syntax_errors: Vec<SyntaxError> = parsed
+        .errors()
+        .iter()
+        .map(|error| {
+            let location = line_index.line_column(error.location.start(), &source_text);
+            SyntaxError {
+                line: location.line.get(),
+                column: location.column.get(),
+                message: error.error.to_string(),
+                blocker: true,
+            }
+        })
+        .collect();
+
+    // Extract both type: ignore comments and type annotation comments in a single pass
+    let (mut type_ignore_lines, mut mypy_ignore_lines, type_comments, mypy_comments) =
+        extract_type_comments_and_ignores(parsed.tokens(), &source_text, &line_index);
+
+    // Apply inline config overrides that affect parsing/serialization.
+    let inline_overrides = crate::mypy_inline_config::resolve_overrides(&mypy_comments);
+    options.extend_always_true(inline_overrides.always_true);
+    options.extend_always_false(inline_overrides.always_false);
+    // Inline ignore-errors can only enable body skipping, not disable it,
+    // since the caller may have set skip_function_bodies based on other
+    // context (e.g. ignore_all from config file section matching).
+    if inline_overrides.ignore_errors == Some(true) {
+        skip_function_bodies = true;
+    }
+
+    let mut top_unreachable = false;
+    let first_ignore = type_ignore_lines.get(0).cloned();
+    let first_statement_line = first_statement_line(parsed.syntax(), &source_text, &line_index);
+
+    if first_ignore.is_some() {
+        let (first_line, codes) = first_ignore.unwrap();
+        if first_line < first_statement_line {
+            top_unreachable = true;
+            type_ignore_lines = Vec::new();
+            if !codes.is_empty() {
+                let joined = codes.join(", ");
+                let error = format!(
+                    "Type ignore with error code is not supported for modules; \
+                    use `# mypy: disable-error-code=\"{}\"`",
+                    joined
+                );
+                syntax_errors.push(SyntaxError {
+                    line: first_line,
+                    column: 0,
+                    message: error,
+                    blocker: false,
+                })
+            }
+        }
+    }
+
+    // Serialize the AST (even if partial due to syntax errors)
+    let mut ser = Serializer {
+        bytes: Vec::new(),
+        imports: Vec::new(),
+        line_index,
+        tokens: Some(parsed.tokens()),
+        text: &source_text,
+        skip_function_bodies,
+        in_class: false,
+        in_function: false,
+        is_all_ascii,
+        lines_with_non_ascii,
+        type_comments,
+        options,
+        current_unreachable: false,
+        current_mypy_only: false,
+        top_level_getattr: false,
+        is_evaluated: true,
+        extra_errors: Vec::new(),
+        skipped_lines: HashSet::new(),
+        uses_template_strings: false,
+    };
+    if top_unreachable {
+        // Module is ignored completely.
+        ser.write_tagged_int(0);
+    } else {
+        parsed.syntax().serialize(&mut ser);
+    }
+
+    // Serialize the collected imports, reusing the moved state from serializer
+    let import_bytes = serialize_imports(
+        &ser.imports,
+        &source_text,
+        Some(ser.line_index),
+        Some(is_all_ascii),
+        Some(ser.lines_with_non_ascii),
+    );
+
+    // Return this directly to caller, so that it can check this without deserialization
+    let is_partial_package = is_stub_package && ser.top_level_getattr;
+
+    syntax_errors.extend(ser.extra_errors);
+    // Skip type ignores on unreachable lines, so that they are not flagged as unused.
+    type_ignore_lines.retain(|(line, _)| !ser.skipped_lines.contains(line));
+    mypy_ignore_lines.retain(|(line, _)| !ser.skipped_lines.contains(line));
+    Ok((
+        ser.bytes,
+        syntax_errors,
+        type_ignore_lines,
+        mypy_ignore_lines,
+        import_bytes,
+        is_partial_package,
+        ser.uses_template_strings,
+        hash_hex,
+        mypy_comments,
+    ))
 }
 
 fn serialize_fstring_elements(ser: &mut Serializer, elems: Vec<&ast::InterpolatedStringElement>) {
