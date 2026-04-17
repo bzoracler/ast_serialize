@@ -23,7 +23,7 @@ class _ASTData(TypedDict):
 
 def parse(
     fnam: str,
-    source: str | None = None,
+    source: str | bytes | None = None,
     skip_function_bodies: bool = False,
     python_version: tuple[int, int] | None = None,
     platform: str | None = None,

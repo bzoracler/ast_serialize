@@ -46,7 +46,7 @@ pub mod type_comment;
 fn parse(
     py: Python,
     fnam: String,
-    source: Option<String>,
+    source: Option<serialize_ast::Source>,
     skip_function_bodies: bool,
     python_version: Option<(u32, u32)>,
     platform: Option<String>,
@@ -67,14 +67,14 @@ fn parse(
 
     let always_true = always_true.unwrap_or_default();
     let always_false = always_false.unwrap_or_default();
-
-    if source.is_some() {
-        return Err(PyErr::new::<PyValueError, _>(
-            "Source parsing is not supported yet",
-        ));
-    }
-
     let path = Path::new(&fnam);
+    let options = options::Options::new(
+        python_version,
+        platform,
+        always_true,
+        always_false,
+        cache_version,
+    );
     let (
         ast_bytes,
         syntax_errors,
@@ -87,17 +87,15 @@ fn parse(
         mypy_comments,
     ) = py
         .detach(|| {
-            serialize_ast::serialize_python_file(
-                path,
-                skip_function_bodies,
-                options::Options::new(
-                    python_version,
-                    platform,
-                    always_true,
-                    always_false,
-                    cache_version,
-                ),
-            )
+            if let Some(src) = source {
+                let s = match src {
+                    serialize_ast::Source::Text(s) => s,
+                    serialize_ast::Source::Bytes(s) => String::from_utf8(s)?,
+                };
+                serialize_ast::serialize_python_source(s, skip_function_bodies, options)
+            } else {
+                serialize_ast::serialize_python_file(path, skip_function_bodies, options)
+            }
         })
         .map_err(|e| PyErr::new::<PyValueError, _>(e.to_string()))?;
 
