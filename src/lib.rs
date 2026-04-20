@@ -4,6 +4,7 @@ use pyo3::types::{PyDict, PyTuple};
 use std::path::Path;
 
 mod func_effect_visitor;
+mod mypy_inline_config;
 mod options;
 pub mod reachability;
 mod serialize_ast;
@@ -83,6 +84,7 @@ fn parse(
         is_partial_package,
         uses_template_strings,
         source_hash,
+        mypy_comments,
     ) = py
         .detach(|| {
             serialize_ast::serialize_python_file(
@@ -125,6 +127,20 @@ fn parse(
     ast_data.set_item("mypy_ignores", py_mypy_ignores)?;
     ast_data.set_item("uses_template_strings", uses_template_strings)?;
     ast_data.set_item("source_hash", source_hash)?;
+    let py_mypy_comments: PyResult<Vec<Py<PyAny>>> = mypy_comments
+        .iter()
+        .map(|(line, text)| {
+            let tuple = PyTuple::new(
+                py,
+                [
+                    line.into_pyobject(py)?.into_any(),
+                    text.into_pyobject(py)?.into_any(),
+                ],
+            )?;
+            Ok(tuple.into())
+        })
+        .collect();
+    ast_data.set_item("mypy_comments", py_mypy_comments?)?;
     let ast_data = ast_data.into();
 
     Ok((
