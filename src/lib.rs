@@ -68,13 +68,6 @@ fn parse(
     let always_true = always_true.unwrap_or_default();
     let always_false = always_false.unwrap_or_default();
     let path = Path::new(&fnam);
-    let options = options::Options::new(
-        python_version,
-        platform,
-        always_true,
-        always_false,
-        cache_version,
-    );
     let (
         ast_bytes,
         syntax_errors,
@@ -87,6 +80,13 @@ fn parse(
         mypy_comments,
     ) = py
         .detach(|| {
+            let options = options::Options::new(
+                python_version,
+                platform,
+                always_true,
+                always_false,
+                cache_version,
+            );
             if let Some(src) = source {
                 serialize_ast::serialize_python_source(src.0, skip_function_bodies, options)
             } else {
