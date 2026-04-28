@@ -88,11 +88,7 @@ fn parse(
     ) = py
         .detach(|| {
             if let Some(src) = source {
-                let s = match src {
-                    serialize_ast::Source::Text(s) => s,
-                    serialize_ast::Source::Bytes(s) => String::from_utf8(s)?,
-                };
-                serialize_ast::serialize_python_source(s, skip_function_bodies, options)
+                serialize_ast::serialize_python_source(src.0, skip_function_bodies, options)
             } else {
                 serialize_ast::serialize_python_file(path, skip_function_bodies, options)
             }

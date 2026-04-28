@@ -5,7 +5,6 @@ use std::fmt::Write;
 use std::path::Path;
 
 use anyhow::Result;
-use pyo3::types::PyAnyMethods;
 use ruff_python_ast::token::{TokenKind, Tokens};
 use ruff_python_ast::{self as ast, AnyParameterRef, Number, PySourceType, StmtFunctionDef};
 use ruff_python_parser::{Mode, ParseOptions, parse_unchecked};
@@ -265,25 +264,34 @@ pub(crate) enum ParsedTypeComment {
     Invalid(String),                     // Error message for invalid type comment
 }
 
-// Represents Python source code originating from either string or bytes
-pub(crate) enum Source {
-    Text(String),
-    Bytes(Vec<u8>),
-}
+// Represents Python source code originating from a Python object and converted into `String`
+pub(crate) struct Source(pub(crate) String);
 
 // Implementation for converting a Python object into `Source`
 impl<'a, 'py> pyo3::FromPyObject<'a, 'py> for Source {
     type Error = pyo3::PyErr;
 
     fn extract(obj: pyo3::Borrowed<'a, 'py, pyo3::PyAny>) -> Result<Self, Self::Error> {
-        if obj.is_instance_of::<pyo3::types::PyString>() {
-            return Ok(Source::Text(obj.extract::<String>()?));
-        } else if obj.is_instance_of::<pyo3::types::PyBytes>() {
-            return Ok(Source::Bytes(obj.extract::<Vec<u8>>()?));
+        if let Ok(s) = obj.extract::<String>() {
+            Ok(Source(s))
+        } else if let Ok(u8s) = obj.extract::<&[u8]>() {
+            let s = String::from_utf8(u8s.to_vec()).map_err(|e| {
+                let utf8_err = e.utf8_error();
+                match pyo3::exceptions::PyUnicodeDecodeError::new_utf8(
+                    obj.py(),
+                    e.as_bytes(),
+                    utf8_err,
+                ) {
+                    Ok(err) => Self::Error::from_value(err.into_any()),
+                    Err(err) => err,
+                }
+            })?;
+            Ok(Source(s))
+        } else {
+            Err(Self::Error::new::<pyo3::exceptions::PyTypeError, _>(
+                "Source must be str or bytes",
+            ))
         }
-        Err(Self::Error::new::<pyo3::exceptions::PyTypeError, _>(
-            "Source must be str or bytes",
-        ))
     }
 }
 
