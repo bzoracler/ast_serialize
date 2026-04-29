@@ -192,7 +192,7 @@ pub(crate) fn serialize_python_file(
     Vec<(usize, String)>,
 )> {
     serialize_module(
-        std::fs::read_to_string(file_path)?,
+        &std::fs::read_to_string(file_path)?,
         PySourceType::from(file_path),
         skip_function_bodies,
         options,
@@ -205,7 +205,7 @@ pub(crate) fn serialize_python_file(
 
 /// Serialize Python source code to mypy AST format
 pub(crate) fn serialize_python_source(
-    source: String,
+    source: &str,
     mut skip_function_bodies: bool,
     mut options: Options,
 ) -> Result<(
@@ -265,31 +265,23 @@ pub(crate) enum ParsedTypeComment {
 }
 
 // Represents Python source code originating from a Python object and converted into `String`
-pub(crate) struct Source(pub(crate) String);
+pub(crate) enum Source<'a> {
+    Text(String),
+    Bytes(&'a [u8]),
+}
 
 // Implementation for converting a Python object into `Source`
-impl<'a, 'py> pyo3::FromPyObject<'a, 'py> for Source {
+impl<'a, 'py> pyo3::FromPyObject<'a, 'py> for Source<'a> {
     type Error = pyo3::PyErr;
 
     fn extract(obj: pyo3::Borrowed<'a, 'py, pyo3::PyAny>) -> Result<Self, Self::Error> {
         if let Ok(s) = obj.extract::<String>() {
-            Ok(Source(s))
-        } else if let Ok(u8s) = obj.extract::<&[u8]>() {
-            let s = String::from_utf8(u8s.to_vec()).map_err(|e| {
-                let utf8_err = e.utf8_error();
-                match pyo3::exceptions::PyUnicodeDecodeError::new_utf8(
-                    obj.py(),
-                    e.as_bytes(),
-                    utf8_err,
-                ) {
-                    Ok(err) => Self::Error::from_value(err.into_any()),
-                    Err(err) => err,
-                }
-            })?;
-            Ok(Source(s))
+            Ok(Source::Text(s))
+        } else if let Ok(s) = obj.extract::<&[u8]>() {
+            Ok(Source::Bytes(s))
         } else {
             Err(Self::Error::new::<pyo3::exceptions::PyTypeError, _>(
-                "Source must be str or bytes",
+                "Source must be str or bytes new",
             ))
         }
     }
@@ -2503,7 +2495,7 @@ impl Ser for ast::Pattern {
 }
 
 fn serialize_module(
-    source_text: String,
+    source_text: &str,
     source_type: PySourceType,
     mut skip_function_bodies: bool,
     mut options: Options,
@@ -2528,7 +2520,7 @@ fn serialize_module(
         }
         hex
     };
-    let line_index = LineIndex::from_source_text(&source_text);
+    let line_index = LineIndex::from_source_text(source_text);
 
     // Check if file is all ASCII and build per-line non-ASCII flags if needed
     let is_all_ascii = source_text.is_ascii();
@@ -2540,14 +2532,14 @@ fn serialize_module(
     };
 
     // Parse the file - this always returns a result, even with syntax errors
-    let parsed = parse_unchecked(&source_text, ParseOptions::from(source_type));
+    let parsed = parse_unchecked(source_text, ParseOptions::from(source_type));
 
     // Extract syntax errors with location information
     let mut syntax_errors: Vec<SyntaxError> = parsed
         .errors()
         .iter()
         .map(|error| {
-            let location = line_index.line_column(error.location.start(), &source_text);
+            let location = line_index.line_column(error.location.start(), source_text);
             SyntaxError {
                 line: location.line.get(),
                 column: location.column.get(),
@@ -2559,7 +2551,7 @@ fn serialize_module(
 
     // Extract both type: ignore comments and type annotation comments in a single pass
     let (mut type_ignore_lines, mut mypy_ignore_lines, type_comments, mypy_comments) =
-        extract_type_comments_and_ignores(parsed.tokens(), &source_text, &line_index);
+        extract_type_comments_and_ignores(parsed.tokens(), source_text, &line_index);
 
     // Apply inline config overrides that affect parsing/serialization.
     let inline_overrides = crate::mypy_inline_config::resolve_overrides(&mypy_comments);
@@ -2574,7 +2566,7 @@ fn serialize_module(
 
     let mut top_unreachable = false;
     let first_ignore = type_ignore_lines.get(0).cloned();
-    let first_statement_line = first_statement_line(parsed.syntax(), &source_text, &line_index);
+    let first_statement_line = first_statement_line(parsed.syntax(), source_text, &line_index);
 
     if first_ignore.is_some() {
         let (first_line, codes) = first_ignore.unwrap();

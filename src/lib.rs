@@ -67,6 +67,20 @@ fn parse(
 
     let always_true = always_true.unwrap_or_default();
     let always_false = always_false.unwrap_or_default();
+
+    let src = source
+        .as_ref()
+        .map(|src| match src {
+            serialize_ast::Source::Text(src) => Ok(src.as_ref()),
+            serialize_ast::Source::Bytes(src) => std::str::from_utf8(src).map_err(|e| {
+                match pyo3::exceptions::PyUnicodeDecodeError::new_utf8(py, src, e) {
+                    Ok(err) => PyErr::from_value(err.into_any()),
+                    Err(err) => err,
+                }
+            }),
+        })
+        .transpose()?;
+
     let path = Path::new(&fnam);
     let (
         ast_bytes,
@@ -87,8 +101,8 @@ fn parse(
                 always_false,
                 cache_version,
             );
-            if let Some(src) = source {
-                serialize_ast::serialize_python_source(src.0, skip_function_bodies, options)
+            if let Some(src) = src {
+                serialize_ast::serialize_python_source(src, skip_function_bodies, options)
             } else {
                 serialize_ast::serialize_python_file(path, skip_function_bodies, options)
             }
