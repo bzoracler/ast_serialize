@@ -281,7 +281,7 @@ impl<'a, 'py> pyo3::FromPyObject<'a, 'py> for Source<'a> {
             Ok(Source::Bytes(s))
         } else {
             Err(Self::Error::new::<pyo3::exceptions::PyTypeError, _>(
-                "Source must be str or bytes new",
+                "Source must be str or bytes",
             ))
         }
     }
