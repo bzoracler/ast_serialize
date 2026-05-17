@@ -163,7 +163,8 @@ const LONG_INT_TRAILER: u8 = 15;
 ///
 /// # Arguments
 ///
-/// * `file_path` - Path to the Python file to parse and serialize
+/// * `file_path` - Path to the Python file to serialize
+/// * `source` - File source contents to parse; if `None`, reads the contents from `file_path`
 /// * `skip_function_bodies` - If true, omit function bodies unless they have externally visible effects
 ///   (for methods in classes only; module-level functions always have bodies omitted when this is true)
 /// * `options` - Reachability analysis options (python version, platform and always-true/-false names)
@@ -180,6 +181,7 @@ const LONG_INT_TRAILER: u8 = 15;
 /// Returns an error if the file cannot be read (but not for syntax errors, which are returned in the tuple)
 pub(crate) fn serialize_python_file(
     file_path: &Path,
+    source: Option<&str>,
     mut skip_function_bodies: bool,
     mut options: Options,
 ) -> Result<(
@@ -194,7 +196,10 @@ pub(crate) fn serialize_python_file(
     Vec<(usize, String)>,
 )> {
     let source_type = PySourceType::from(file_path);
-    let source_text = std::fs::read_to_string(file_path)?;
+    let source_text = match source {
+        Some(source_text) => source_text,
+        None => &std::fs::read_to_string(file_path)?,
+    };
 
     // Compute SHA1 hash of the source text (same as mypy's compute_hash)
     let hash_hex = {
@@ -205,7 +210,7 @@ pub(crate) fn serialize_python_file(
         }
         hex
     };
-    let line_index = LineIndex::from_source_text(&source_text);
+    let line_index = LineIndex::from_source_text(source_text);
     let is_stub_package = match file_path.file_name() {
         Some(file) => file.as_encoded_bytes() == b"__init__.pyi",
         _ => false,
@@ -221,14 +226,14 @@ pub(crate) fn serialize_python_file(
     };
 
     // Parse the file - this always returns a result, even with syntax errors
-    let parsed = parse_unchecked(&source_text, ParseOptions::from(source_type));
+    let parsed = parse_unchecked(source_text, ParseOptions::from(source_type));
 
     // Extract syntax errors with location information
     let mut syntax_errors: Vec<SyntaxError> = parsed
         .errors()
         .iter()
         .map(|error| {
-            let location = line_index.line_column(error.location.start(), &source_text);
+            let location = line_index.line_column(error.location.start(), source_text);
             SyntaxError {
                 line: location.line.get(),
                 column: location.column.get(),
@@ -240,7 +245,7 @@ pub(crate) fn serialize_python_file(
 
     // Extract both type: ignore comments and type annotation comments in a single pass
     let (mut type_ignore_lines, mut mypy_ignore_lines, type_comments, mypy_comments) =
-        extract_type_comments_and_ignores(parsed.tokens(), &source_text, &line_index);
+        extract_type_comments_and_ignores(parsed.tokens(), source_text, &line_index);
 
     // Apply inline config overrides that affect parsing/serialization.
     let inline_overrides = crate::mypy_inline_config::resolve_overrides(&mypy_comments);
@@ -255,7 +260,7 @@ pub(crate) fn serialize_python_file(
 
     let mut top_unreachable = false;
     let first_ignore = type_ignore_lines.get(0).cloned();
-    let first_statement_line = first_statement_line(parsed.syntax(), &source_text, &line_index);
+    let first_statement_line = first_statement_line(parsed.syntax(), source_text, &line_index);
 
     if first_ignore.is_some() {
         let (first_line, codes) = first_ignore.unwrap();
@@ -285,7 +290,7 @@ pub(crate) fn serialize_python_file(
         imports: Vec::new(),
         line_index,
         tokens: Some(parsed.tokens()),
-        text: &source_text,
+        text: source_text,
         skip_function_bodies,
         in_class: false,
         in_function: false,
@@ -311,7 +316,7 @@ pub(crate) fn serialize_python_file(
     // Serialize the collected imports, reusing the moved state from serializer
     let import_bytes = serialize_imports(
         &ser.imports,
-        &source_text,
+        source_text,
         Some(ser.line_index),
         Some(is_all_ascii),
         Some(ser.lines_with_non_ascii),
@@ -371,6 +376,29 @@ pub(crate) enum ParsedTypeComment {
     Regular(ast::Expr),                  // Comment like `# type: int`
     Function(Vec<ast::Expr>, ast::Expr), // Comment like `# type: (int, str) -> None`
     Invalid(String),                     // Error message for invalid type comment
+}
+
+// Represents Python source code originating from a Python object and converted into `String`
+pub(crate) enum Source<'a> {
+    Text(String),
+    Bytes(&'a [u8]),
+}
+
+// Implementation for converting a Python object into `Source`
+impl<'a, 'py> pyo3::FromPyObject<'a, 'py> for Source<'a> {
+    type Error = pyo3::PyErr;
+
+    fn extract(obj: pyo3::Borrowed<'a, 'py, pyo3::PyAny>) -> Result<Self, Self::Error> {
+        if let Ok(s) = obj.extract::<String>() {
+            Ok(Source::Text(s))
+        } else if let Ok(s) = obj.extract::<&[u8]>() {
+            Ok(Source::Bytes(s))
+        } else {
+            Err(Self::Error::new::<pyo3::exceptions::PyTypeError, _>(
+                "Source must be str or bytes",
+            ))
+        }
+    }
 }
 
 struct Serializer<'a> {
@@ -3822,7 +3850,7 @@ mod tests {
         let path2 = write_temp_py("test_inline_at_2", source_without_comment);
 
         // Parse with inline comment, no caller-provided always_true
-        let result_inline = serialize_python_file(&path1, false, Options::default()).unwrap();
+        let result_inline = serialize_python_file(&path1, None, false, Options::default()).unwrap();
         // Parse without comment, but pass always_true via options
         let options_with_flag = Options::new(
             (3, 12),
@@ -3831,7 +3859,7 @@ mod tests {
             vec![],
             1,
         );
-        let result_option = serialize_python_file(&path2, false, options_with_flag).unwrap();
+        let result_option = serialize_python_file(&path2, None, false, options_with_flag).unwrap();
 
         let _ = std::fs::remove_file(&path1);
         let _ = std::fs::remove_file(&path2);
@@ -3847,7 +3875,7 @@ mod tests {
     fn test_source_hash() {
         let source = "x = 1\n";
         let path = write_temp_py("test_source_hash", source);
-        let result = serialize_python_file(&path, false, Options::default()).unwrap();
+        let result = serialize_python_file(&path, None, false, Options::default()).unwrap();
         let _ = std::fs::remove_file(&path);
         let hash_hex = &result.7;
         assert_eq!(hash_hex, "e139f73e34322031189110afc1939eb1877a8954");

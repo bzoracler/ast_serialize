@@ -46,7 +46,7 @@ pub mod type_comment;
 fn parse(
     py: Python,
     fnam: String,
-    source: Option<String>,
+    source: Option<serialize_ast::Source>,
     skip_function_bodies: bool,
     python_version: Option<(u32, u32)>,
     platform: Option<String>,
@@ -68,11 +68,18 @@ fn parse(
     let always_true = always_true.unwrap_or_default();
     let always_false = always_false.unwrap_or_default();
 
-    if source.is_some() {
-        return Err(PyErr::new::<PyValueError, _>(
-            "Source parsing is not supported yet",
-        ));
-    }
+    let src = source
+        .as_ref()
+        .map(|src| match src {
+            serialize_ast::Source::Text(src) => Ok(src.as_ref()),
+            serialize_ast::Source::Bytes(src) => std::str::from_utf8(src).map_err(|e| {
+                match pyo3::exceptions::PyUnicodeDecodeError::new_utf8(py, src, e) {
+                    Ok(err) => PyErr::from_value(err.into_any()),
+                    Err(err) => err,
+                }
+            }),
+        })
+        .transpose()?;
 
     let path = Path::new(&fnam);
     let (
@@ -89,6 +96,7 @@ fn parse(
         .detach(|| {
             serialize_ast::serialize_python_file(
                 path,
+                src,
                 skip_function_bodies,
                 options::Options::new(
                     python_version,
