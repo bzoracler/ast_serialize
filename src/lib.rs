@@ -94,13 +94,18 @@ fn parse(
         mypy_comments,
     ) = py
         .detach(|| {
-            serialize_ast::serialize_python_file(path, src, skip_function_bodies, options::Options::new(
-                python_version,
-                platform,
-                always_true,
-                always_false,
-                cache_version,
-            ))
+            serialize_ast::serialize_python_file(
+                path,
+                src,
+                skip_function_bodies,
+                options::Options::new(
+                    python_version,
+                    platform,
+                    always_true,
+                    always_false,
+                    cache_version,
+                ),
+            )
         })
         .map_err(|e| PyErr::new::<PyValueError, _>(e.to_string()))?;
 
